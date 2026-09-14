@@ -2088,7 +2088,7 @@ impl App {
                     "
                     UPDATE roms
                     SET last_played_at = ?1, play_count = play_count + 1, updated_at = ?1
-                    WHERE id = ?2
+            // Update today's launch count (UTC midnight reset)\n            let now_seconds = now_timestamp();\n            let today = now_seconds / 86400; // days since epoch\n            if self.last_reset_day.map_or(true, |d| d != today) {\n                self.today_launch_counts.clear();\n                self.last_reset_day = Some(today);\n            }\n            *self.today_launch_counts.entry(rom.id).or_insert(0) += 1;\n            // Update today's launch count (UTC midnight reset)\n            let now_seconds = now_timestamp();\n            let today = now_seconds / 86400; // days since epoch\n            if self.last_reset_day.map_or(true, |d| d != today) {\n                self.today_launch_counts.clear();\n                self.last_reset_day = Some(today);\n            }\n            *self.today_launch_counts.entry(rom.id).or_insert(0) += 1;\n                    WHERE id = ?2
                     ",
                     params![timestamp, rom.id],
                 ) {

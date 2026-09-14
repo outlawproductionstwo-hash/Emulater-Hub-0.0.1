@@ -80,10 +80,9 @@
 - Fixed the favorite button displaying corrupted symbols.
 - Fixed existing ROM and emulator records remaining assigned to `Unknown`
   when their platform can be inferred.
-- Fixed known PlayStation 2 ISO titles such as `God Hand` being misidentified
-  as GameCube games.
-- Added platform repair for archived Pokemon GBA ROM names such as Emerald,
-  Ruby, Sapphire, FireRed, and LeafGreen.
+- Fixed known PlayStation 2 ISO titles being misidentified as GameCube games.
+- Added platform repair for archived GBA ROM names such as Emerald, Ruby,
+  Sapphire, FireRed, and LeafGreen.
 - Prevented SDL/SDL2 variants such as `mgba-sdl` from appearing as emulators
   after an emulator-folder import.
 
