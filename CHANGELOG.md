@@ -1,5 +1,48 @@
 # Changelog
 
+## [0.0.5-alpha1] - 2026-09-14
+
+### Added
+
+- Added an **Upscaling** tab above Settings.
+- Bundled the portable Magpie companion with the Windows installer, including
+  its executable, required Windows runtime files, effects, and license text.
+- Added controls to start and stop Magpie from Emulator Hub.
+- Added an option to start Magpie automatically when launching a ROM.
+- Added in-app Magpie profile controls for FSR, Anime4K, CAS, xBRZ, Lanczos,
+  and Nearest scaling modes.
+- Added a configurable scale multiplier and automatic `ScalingModes.json`
+  profile generation.
+- Added an in-app sharpening control for FSR and CAS profiles.
+- Added automatic scaling after ROM launch by focusing the emulator window and
+  sending the configured Magpie hotkey.
+- Persisted the Magpie integration preferences in the SQLite app state.
+- Added setup guidance explaining the Magpie companion workflow, hotkey
+  configuration, automatic-start behavior, and where bundled Magpie files are
+  installed.
+
+### Attribution and licensing
+
+- Thank you to the Magpie project and its contributors for providing the
+  open-source Windows upscaling companion used by this alpha.
+- Emulator Hub remains licensed under the MIT License.
+- Bundled Magpie files remain under Magpie's GNU General Public License
+  version 3 (GPLv3). The complete Magpie license is included with the
+  installer at `tools\Magpie\LICENSE.txt`.
+- Magpie runs as a separate companion process; it is not linked into the
+  Emulator Hub executable.
+
+### Setup requirements
+
+- Windows 10 or later with a DirectX-capable graphics system.
+- Install the alpha using the provided per-user installer so Magpie is placed
+  under `%LOCALAPPDATA%\Programs\EmulatorHub\tools\Magpie`.
+- Open **Upscaling**, choose a profile, apply it, and configure the matching
+  Magpie scaling hotkey.
+- Enable automatic Magpie startup or start it manually before launching ROMs.
+- The standalone executable does not include the bundled Magpie files; use the
+  installer for the complete integrated setup.
+
 ## [0.0.4.2] - 2026-09-14
 
 ### Changed

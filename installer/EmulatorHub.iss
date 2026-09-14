@@ -2,7 +2,7 @@
 #define MyAppPublisher "Emulator Hub"
 
 #ifndef MyAppVersion
-  #define MyAppVersion "0.0.4.2"
+  #define MyAppVersion "0.0.5-alpha1"
 #endif
 
 #ifndef SourceDir
@@ -42,6 +42,13 @@ RestartApplications=no
 [Files]
 Source: "{#SourceDir}\emulator_hub_gui.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#VCRedistPath}"; DestDir: "{tmp}"; Flags: deleteafterinstall
+Source: "..\installer\Magpie\LICENSE.txt"; DestDir: "{app}\tools\Magpie"; Flags: ignoreversion
+Source: "..\installer\Magpie\Magpie.exe"; DestDir: "{app}\tools\Magpie"; Flags: ignoreversion
+Source: "..\installer\Magpie\Microsoft.UI.Xaml.dll"; DestDir: "{app}\tools\Magpie"; Flags: ignoreversion
+Source: "..\installer\Magpie\resources.pri"; DestDir: "{app}\tools\Magpie"; Flags: ignoreversion
+Source: "..\installer\Magpie\TouchHelper.exe"; DestDir: "{app}\tools\Magpie"; Flags: ignoreversion
+Source: "..\installer\Magpie\Updater.exe"; DestDir: "{app}\tools\Magpie"; Flags: ignoreversion
+Source: "..\installer\Magpie\effects\*"; DestDir: "{app}\tools\Magpie\effects"; Flags: recursesubdirs createallsubdirs ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 

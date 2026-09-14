@@ -8,6 +8,11 @@
   A Windows desktop library for organizing emulators and ROMs in one place.
 </p>
 
+## Version 0.0.5-alpha1
+
+This alpha adds an integrated Upscaling tab with a bundled Magpie companion.
+Magpie can be started from Emulator Hub or automatically when a ROM launches.
+
 ## Version 0.0.4.2
 
 This hotfix cleans up the main library layout, moving selected ROM details and
@@ -31,13 +36,19 @@ emulator controls higher while keeping library navigation at the bottom.
 - Load matching local ROM artwork and allow artwork to be selected manually.
 - Optionally download ROM artwork automatically from TheGamesDB using a
   user-provided API key.
+- Use the bundled Magpie companion to upscale emulator windows.
+- Create and apply Magpie scaling profiles from the Upscaling tab, including
+  FSR, Anime4K, CAS, xBRZ, Lanczos, and Nearest.
+- Adjust the selected profile's scale multiplier and sharpening amount.
+- Automatically focus a newly launched emulator window and trigger Magpie's
+  configured scaling shortcut after a short startup delay.
 
 ## Download and install
 
 Download the installer from the GitHub Release assets:
 
 ```text
-EmulatorHub-v0.0.4.2-Setup.exe
+EmulatorHub-v0.0.5-alpha1-Setup.exe
 ```
 
 The installer places the app in:
@@ -56,7 +67,12 @@ is also published for portable use.
 2. Import one or more emulator executables.
 3. Import ROM files or a ROM folder.
 4. Open **Settings** to configure launch arguments.
-5. Click a ROM in the library to launch it.
+5. Open **Upscaling**, choose a scaling profile, and click **Apply Profile**.
+6. Start Magpie there or enable automatic startup.
+7. Click a ROM in the library to launch it, then use Magpie's configured
+   scaling hotkey on the emulator window. To remove that manual step, enable
+   automatic scaling in the Upscaling tab and set the matching
+   `Alt+Shift+key` there.
 
 The app keeps imported file paths in the library. ROM files are not copied into
 the database.
@@ -71,6 +87,16 @@ The SQLite library is stored at:
 
 The database stores library records and metadata, while emulator and ROM files
 remain in their original locations.
+
+Magpie is installed under:
+
+```text
+tools\Magpie\
+```
+
+It is managed as a background companion process rather than linked into the
+Emulator Hub executable. Its license is included at
+`tools\Magpie\LICENSE.txt`.
 
 ## Building from source
 
@@ -122,8 +148,8 @@ matching tag:
 
 ```powershell
 git add .
-git commit -m "Release Emulator Hub 0.0.4.2"
-git tag v0.0.4.2
+git commit -m "Release Emulator Hub 0.0.5-alpha1"
+git tag v0.0.5-alpha1
 git push origin main --tags
 ```
 

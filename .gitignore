@@ -1,3 +1,7 @@
 /target
 /release
 installer/vc_redist.x64.exe
+installer/Magpie-v*.zip
+installer/Magpie/cache/
+installer/Magpie/logs/
+installer/Magpie/ScalingModes.json

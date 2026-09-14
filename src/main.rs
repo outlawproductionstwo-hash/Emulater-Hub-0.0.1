@@ -15,12 +15,20 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const EXECUTABLE_EXTENSIONS: &[&str] = &["exe", "bat", "cmd", "com", "pif", "vbs", "wsf"];
+const MAGPIE_PRESETS: &[(&str, &str)] = &[
+    ("FSR", "AMD FidelityFX Super Resolution"),
+    ("Anime4K", "Anime4K anime/game upscaling"),
+    ("CAS", "Contrast Adaptive Sharpening"),
+    ("xBRZ", "Pixel-art focused scaling"),
+    ("Lanczos", "High-quality traditional scaling"),
+    ("Nearest", "Crisp nearest-neighbor scaling"),
+];
 // Cargo keeps the package at three-part semver while the display/release
 // version can include a hotfix component.
-const APP_VERSION: &str = "0.0.4.2";
+const APP_VERSION: &str = "0.0.5-alpha1";
 const GITHUB_REPOSITORY: Option<&str> = option_env!("EMULATOR_HUB_GITHUB_REPOSITORY");
 
 fn app_icon() -> Option<egui::IconData> {
@@ -116,6 +124,7 @@ fn show_icon_tile(ui: &mut Ui, label: &str, accent: Color32, missing: bool) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Main,
+    Upscaling,
     Settings,
 }
 
@@ -229,6 +238,14 @@ struct StoredState {
     artwork_api_key: String,
     default_settings: LaunchSettings,
     tab: Tab,
+    magpie_enabled: bool,
+    magpie_auto_start: bool,
+    magpie_preset: String,
+    magpie_scale: f32,
+    magpie_sharpness: f32,
+    magpie_auto_scale: bool,
+    magpie_hotkey_key: String,
+    magpie_auto_scale_delay_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -273,6 +290,23 @@ struct App {
     cover_art_textures: HashMap<String, TextureHandle>,
     emulator_icon_textures: HashMap<String, TextureHandle>,
     artwork_api_key: String,
+    magpie_enabled: bool,
+    magpie_auto_start: bool,
+    magpie_preset: String,
+    magpie_scale: f32,
+    magpie_sharpness: f32,
+    magpie_auto_scale: bool,
+    magpie_hotkey_key: String,
+    magpie_auto_scale_delay_ms: u64,
+    magpie_process: Option<std::process::Child>,
+    pending_auto_scale: Option<PendingAutoScale>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingAutoScale {
+    process_id: u32,
+    not_before: Instant,
+    expires_at: Instant,
 }
 
 fn database_path() -> PathBuf {
@@ -639,7 +673,7 @@ fn fetch_artwork_url(
             url_encode(&search_term),
         );
         let payload: serde_json::Value = ureq::get(&search_url)
-            .set("User-Agent", "EmulatorHub/0.0.4.2")
+            .set("User-Agent", "EmulatorHub/0.0.5-alpha1")
             .call()?
             .into_json()?;
         let base_url = find_original_image_base_url(&payload);
@@ -653,7 +687,7 @@ fn fetch_artwork_url(
                 url_encode(api_key)
             );
             let images: serde_json::Value = ureq::get(&images_url)
-                .set("User-Agent", "EmulatorHub/0.0.4.2")
+                .set("User-Agent", "EmulatorHub/0.0.5-alpha1")
                 .call()?
                 .into_json()?;
             let base_url = find_original_image_base_url(&images);
@@ -675,7 +709,7 @@ fn download_artwork(url: &str) -> Result<PathBuf, Box<dyn Error + Send + Sync>> 
     }
     let mut bytes = Vec::new();
     ureq::get(url)
-        .set("User-Agent", "EmulatorHub/0.0.4.2")
+        .set("User-Agent", "EmulatorHub/0.0.5-alpha1")
         .call()?
         .into_reader()
         .read_to_end(&mut bytes)?;
@@ -833,7 +867,15 @@ fn init_schema(connection: &Connection) -> rusqlite::Result<()> {
             default_resolution_height INTEGER NOT NULL DEFAULT 1080,
             default_res_width_arg TEXT NOT NULL DEFAULT '-width',
             default_res_height_arg TEXT NOT NULL DEFAULT '-height',
-            artwork_api_key TEXT
+            artwork_api_key TEXT,
+            magpie_enabled INTEGER NOT NULL DEFAULT 0,
+            magpie_auto_start INTEGER NOT NULL DEFAULT 0,
+            magpie_preset TEXT NOT NULL DEFAULT 'FSR',
+            magpie_scale REAL NOT NULL DEFAULT 2.0,
+            magpie_sharpness REAL NOT NULL DEFAULT 0.87,
+            magpie_auto_scale INTEGER NOT NULL DEFAULT 0,
+            magpie_hotkey_key TEXT NOT NULL DEFAULT 'A',
+            magpie_auto_scale_delay_ms INTEGER NOT NULL DEFAULT 2000
         );
 
         INSERT OR IGNORE INTO app_state (id) VALUES (1);
@@ -883,13 +925,53 @@ fn init_schema(connection: &Connection) -> rusqlite::Result<()> {
 }
 
 fn ensure_app_state_columns(connection: &Connection) -> rusqlite::Result<()> {
-    let column_exists: i64 = connection.query_row(
-        "SELECT COUNT(*) FROM pragma_table_info('app_state') WHERE name = 'artwork_api_key'",
-        [],
-        |row| row.get(0),
-    )?;
-    if column_exists == 0 {
-        connection.execute("ALTER TABLE app_state ADD COLUMN artwork_api_key TEXT", [])?;
+    let columns = [
+        (
+            "artwork_api_key",
+            "ALTER TABLE app_state ADD COLUMN artwork_api_key TEXT",
+        ),
+        (
+            "magpie_enabled",
+            "ALTER TABLE app_state ADD COLUMN magpie_enabled INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "magpie_auto_start",
+            "ALTER TABLE app_state ADD COLUMN magpie_auto_start INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "magpie_preset",
+            "ALTER TABLE app_state ADD COLUMN magpie_preset TEXT NOT NULL DEFAULT 'FSR'",
+        ),
+        (
+            "magpie_scale",
+            "ALTER TABLE app_state ADD COLUMN magpie_scale REAL NOT NULL DEFAULT 2.0",
+        ),
+        (
+            "magpie_sharpness",
+            "ALTER TABLE app_state ADD COLUMN magpie_sharpness REAL NOT NULL DEFAULT 0.87",
+        ),
+        (
+            "magpie_auto_scale",
+            "ALTER TABLE app_state ADD COLUMN magpie_auto_scale INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "magpie_hotkey_key",
+            "ALTER TABLE app_state ADD COLUMN magpie_hotkey_key TEXT NOT NULL DEFAULT 'A'",
+        ),
+        (
+            "magpie_auto_scale_delay_ms",
+            "ALTER TABLE app_state ADD COLUMN magpie_auto_scale_delay_ms INTEGER NOT NULL DEFAULT 2000",
+        ),
+    ];
+    for (name, alter_statement) in columns {
+        let column_exists: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('app_state') WHERE name = ?1",
+            params![name],
+            |row| row.get(0),
+        )?;
+        if column_exists == 0 {
+            connection.execute(alter_statement, [])?;
+        }
     }
     Ok(())
 }
@@ -1102,7 +1184,10 @@ fn read_stored_state(connection: &Connection) -> rusqlite::Result<StoredState> {
                default_borderless_enabled, default_borderless_arg,
                default_resolution_enabled, default_resolution_width,
                default_resolution_height, default_res_width_arg,
-               default_res_height_arg, artwork_api_key
+               default_res_height_arg, artwork_api_key,
+               magpie_enabled, magpie_auto_start, magpie_preset, magpie_scale,
+               magpie_sharpness, magpie_auto_scale, magpie_hotkey_key,
+               magpie_auto_scale_delay_ms
         FROM app_state WHERE id = 1
         ",
         [],
@@ -1113,11 +1198,24 @@ fn read_stored_state(connection: &Connection) -> rusqlite::Result<StoredState> {
                 current_dir: row.get::<_, Option<String>>(1)?.map(PathBuf::from),
                 emulator_dir: row.get::<_, Option<String>>(2)?.map(PathBuf::from),
                 artwork_api_key: row.get::<_, Option<String>>(13)?.unwrap_or_default(),
-                tab: if selected_tab == "Settings" {
-                    Tab::Settings
-                } else {
-                    Tab::Main
+                tab: match selected_tab.as_str() {
+                    "Upscaling" => Tab::Upscaling,
+                    "Settings" => Tab::Settings,
+                    _ => Tab::Main,
                 },
+                magpie_enabled: row.get::<_, i64>(14)? != 0,
+                magpie_auto_start: row.get::<_, i64>(15)? != 0,
+                magpie_preset: row
+                    .get::<_, Option<String>>(16)?
+                    .filter(|value| MAGPIE_PRESETS.iter().any(|(name, _)| name == value))
+                    .unwrap_or_else(|| "FSR".to_string()),
+                magpie_scale: row.get::<_, f64>(17)?.clamp(1.0, 4.0) as f32,
+                magpie_sharpness: row.get::<_, f64>(18)?.clamp(0.0, 1.0) as f32,
+                magpie_auto_scale: row.get::<_, i64>(19)? != 0,
+                magpie_hotkey_key: normalize_magpie_hotkey_key(
+                    &row.get::<_, Option<String>>(20)?.unwrap_or_default(),
+                ),
+                magpie_auto_scale_delay_ms: row.get::<_, i64>(21)?.clamp(500, 10_000) as u64,
                 default_settings: LaunchSettings {
                     fullscreen_enabled: row.get::<_, i64>(4)? != 0,
                     fullscreen_arg: row.get(5)?,
@@ -1250,15 +1348,18 @@ fn enumerate_files(folder: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-fn version_tuple(version: &str) -> Option<(u64, u64, u64, u64)> {
+fn version_tuple(version: &str) -> Option<(u64, u64, u64, u64, bool)> {
     let version = version.trim().trim_start_matches('v');
-    let version = version.split('-').next()?;
+    let mut version_parts = version.splitn(2, '-');
+    let version = version_parts.next()?;
+    let is_stable = version_parts.next().is_none();
     let mut parts = version.split('.');
     Some((
         parts.next()?.parse().ok()?,
         parts.next()?.parse().ok()?,
         parts.next()?.parse().ok()?,
         parts.next().unwrap_or("0").parse().ok()?,
+        is_stable,
     ))
 }
 
@@ -1380,6 +1481,150 @@ fn apply_update_helper(args: &[String]) -> Result<(), Box<dyn Error + Send + Syn
     Err("Timed out waiting for Emulator Hub to exit.".into())
 }
 
+fn bundled_magpie_path() -> Option<PathBuf> {
+    let installed_path = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+        .map(|directory| directory.join("tools").join("Magpie").join("Magpie.exe"));
+    if installed_path.as_ref().is_some_and(|path| path.is_file()) {
+        return installed_path;
+    }
+
+    let development_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("installer")
+        .join("Magpie")
+        .join("Magpie.exe");
+    development_path.is_file().then_some(development_path)
+}
+
+fn normalize_magpie_hotkey_key(value: &str) -> String {
+    let key = value.trim().to_ascii_uppercase();
+    if key.len() == 1 && key.as_bytes()[0].is_ascii_alphabetic() {
+        key
+    } else {
+        "A".to_string()
+    }
+}
+
+#[cfg(windows)]
+fn magpie_hotkey_virtual_key(value: &str) -> u8 {
+    normalize_magpie_hotkey_key(value).as_bytes()[0]
+}
+
+#[cfg(windows)]
+struct MagpieWindowSearch {
+    process_id: u32,
+    window: windows_sys::Win32::Foundation::HWND,
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn find_magpie_target_window(
+    window: windows_sys::Win32::Foundation::HWND,
+    parameter: windows_sys::Win32::Foundation::LPARAM,
+) -> i32 {
+    use std::ptr::null_mut;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GW_OWNER, GetWindow, GetWindowThreadProcessId, IsWindowVisible,
+    };
+
+    unsafe {
+        let search = &mut *(parameter as *mut MagpieWindowSearch);
+        let mut process_id = 0;
+        GetWindowThreadProcessId(window, &mut process_id);
+        if process_id == search.process_id
+            && IsWindowVisible(window) != 0
+            && GetWindow(window, GW_OWNER) == null_mut()
+        {
+            search.window = window;
+            return 0;
+        }
+    }
+    1
+}
+
+#[cfg(windows)]
+fn find_window_for_process(process_id: u32) -> Option<windows_sys::Win32::Foundation::HWND> {
+    use std::ptr::null_mut;
+    use windows_sys::Win32::UI::WindowsAndMessaging::EnumWindows;
+
+    let mut search = MagpieWindowSearch {
+        process_id,
+        window: null_mut(),
+    };
+    unsafe {
+        EnumWindows(
+            Some(find_magpie_target_window),
+            &mut search as *mut MagpieWindowSearch as isize,
+        );
+    }
+    (!search.window.is_null()).then_some(search.window)
+}
+
+#[cfg(windows)]
+fn send_magpie_scale_hotkey(process_id: u32, hotkey_key: &str) -> bool {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        KEYEVENTF_KEYUP, VK_MENU, VK_SHIFT, keybd_event,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SW_RESTORE, SetForegroundWindow, ShowWindow,
+    };
+
+    let Some(window) = find_window_for_process(process_id) else {
+        return false;
+    };
+    unsafe {
+        ShowWindow(window, SW_RESTORE);
+        SetForegroundWindow(window);
+        thread::sleep(Duration::from_millis(75));
+        keybd_event(VK_MENU as u8, 0, 0, 0);
+        keybd_event(VK_SHIFT as u8, 0, 0, 0);
+        keybd_event(magpie_hotkey_virtual_key(hotkey_key), 0, 0, 0);
+        keybd_event(magpie_hotkey_virtual_key(hotkey_key), 0, KEYEVENTF_KEYUP, 0);
+        keybd_event(VK_SHIFT as u8, 0, KEYEVENTF_KEYUP, 0);
+        keybd_event(VK_MENU as u8, 0, KEYEVENTF_KEYUP, 0);
+    }
+    true
+}
+
+fn magpie_scaling_modes_path() -> Option<PathBuf> {
+    bundled_magpie_path().and_then(|path| {
+        path.parent()
+            .map(|directory| directory.join("ScalingModes.json"))
+    })
+}
+
+fn magpie_effect(name: &str, scale: Option<f32>) -> serde_json::Value {
+    let mut effect = serde_json::json!({ "name": name });
+    if let Some(scale) = scale {
+        effect["scalingType"] = serde_json::json!(1);
+        effect["scale"] = serde_json::json!({ "x": scale, "y": scale });
+    }
+    effect
+}
+
+fn magpie_profile_json(preset: &str, scale: f32, sharpness: f32) -> serde_json::Value {
+    let effects = match preset {
+        "Anime4K" => vec![magpie_effect("Anime4K\\Anime4K_Upscale_L", None)],
+        "CAS" => {
+            let mut effect = magpie_effect("CAS\\CAS_Scaling", Some(scale));
+            effect["sharpness"] = serde_json::json!(sharpness);
+            vec![effect]
+        }
+        "xBRZ" => vec![magpie_effect("xBRZ\\xBRZ_2x", None)],
+        "Lanczos" => vec![magpie_effect("Lanczos", Some(scale))],
+        "Nearest" => vec![magpie_effect("Nearest", Some(scale))],
+        _ => {
+            let mut rcas = magpie_effect("FSR\\FSR_RCAS", None);
+            rcas["sharpness"] = serde_json::json!(sharpness);
+            vec![magpie_effect("FSR\\FSR_EASU", Some(scale)), rcas]
+        }
+    };
+    serde_json::json!({
+        "name": format!("Emulator Hub - {preset}"),
+        "effects": effects,
+    })
+}
+
 impl App {
     fn new() -> Result<Self, Box<dyn Error + Send + Sync>> {
         let (db, migration_status) = open_database()?;
@@ -1419,6 +1664,16 @@ impl App {
             cover_art_textures: HashMap::new(),
             emulator_icon_textures: HashMap::new(),
             artwork_api_key: stored_state.artwork_api_key,
+            magpie_enabled: stored_state.magpie_enabled,
+            magpie_auto_start: stored_state.magpie_auto_start,
+            magpie_preset: stored_state.magpie_preset,
+            magpie_scale: stored_state.magpie_scale,
+            magpie_sharpness: stored_state.magpie_sharpness,
+            magpie_auto_scale: stored_state.magpie_auto_scale,
+            magpie_hotkey_key: stored_state.magpie_hotkey_key,
+            magpie_auto_scale_delay_ms: stored_state.magpie_auto_scale_delay_ms,
+            magpie_process: None,
+            pending_auto_scale: None,
         };
         app.refresh_from_db()?;
         Ok(app)
@@ -1442,6 +1697,7 @@ impl App {
     fn save_app_state(&self) -> rusqlite::Result<()> {
         let tab = match self.tab {
             Tab::Main => "Main",
+            Tab::Upscaling => "Upscaling",
             Tab::Settings => "Settings",
         };
         let current_dir =
@@ -1462,7 +1718,15 @@ impl App {
                 default_resolution_height = ?11,
                 default_res_width_arg = ?12,
                 default_res_height_arg = ?13,
-                artwork_api_key = ?14
+                artwork_api_key = ?14,
+                magpie_enabled = ?15,
+                magpie_auto_start = ?16,
+                magpie_preset = ?17,
+                magpie_scale = ?18,
+                magpie_sharpness = ?19,
+                magpie_auto_scale = ?20,
+                magpie_hotkey_key = ?21,
+                magpie_auto_scale_delay_ms = ?22
             WHERE id = 1
             ",
             params![
@@ -1480,9 +1744,159 @@ impl App {
                 self.default_settings.res_width_arg,
                 self.default_settings.res_height_arg,
                 self.artwork_api_key.trim(),
+                self.magpie_enabled as i64,
+                self.magpie_auto_start as i64,
+                self.magpie_preset,
+                self.magpie_scale as f64,
+                self.magpie_sharpness as f64,
+                self.magpie_auto_scale as i64,
+                normalize_magpie_hotkey_key(&self.magpie_hotkey_key),
+                self.magpie_auto_scale_delay_ms.clamp(500, 10_000) as i64,
             ],
         )?;
         Ok(())
+    }
+
+    fn magpie_is_running(&mut self) -> bool {
+        let Some(process) = &mut self.magpie_process else {
+            return false;
+        };
+        match process.try_wait() {
+            Ok(Some(_)) => {
+                self.magpie_process = None;
+                false
+            }
+            Ok(None) => true,
+            Err(_) => {
+                self.magpie_process = None;
+                false
+            }
+        }
+    }
+
+    fn start_magpie(&mut self) {
+        if self.magpie_is_running() {
+            self.status = "Magpie is already running.".to_string();
+            return;
+        }
+
+        let Some(executable) = bundled_magpie_path() else {
+            self.status =
+                "Bundled Magpie was not found. Reinstall Emulator Hub or use the source checkout."
+                    .to_string();
+            return;
+        };
+        let Some(directory) = executable.parent() else {
+            self.status = "Could not locate Magpie's application folder.".to_string();
+            return;
+        };
+
+        match Command::new(&executable).current_dir(directory).spawn() {
+            Ok(process) => {
+                self.magpie_process = Some(process);
+                self.magpie_enabled = true;
+                let _ = self.save_app_state();
+                self.status = "Magpie started in the background.".to_string();
+            }
+            Err(error) => self.status = format!("Could not start Magpie: {error}"),
+        }
+    }
+
+    fn stop_magpie(&mut self) {
+        let Some(mut process) = self.magpie_process.take() else {
+            return;
+        };
+        let _ = process.kill();
+        let _ = process.wait();
+        self.status = "Magpie stopped.".to_string();
+    }
+
+    fn process_pending_auto_scale(&mut self) {
+        #[cfg(windows)]
+        {
+            let Some(pending) = self.pending_auto_scale.clone() else {
+                return;
+            };
+            let now = Instant::now();
+            if now < pending.not_before {
+                return;
+            }
+            if send_magpie_scale_hotkey(pending.process_id, &self.magpie_hotkey_key) {
+                self.pending_auto_scale = None;
+                self.status = format!(
+                    "Automatically applied Magpie scaling with Alt+Shift+{}.",
+                    self.magpie_hotkey_key
+                );
+            } else if now >= pending.expires_at {
+                self.pending_auto_scale = None;
+                self.status =
+                    "ROM started, but its window was not found for automatic Magpie scaling."
+                        .to_string();
+            }
+        }
+
+        #[cfg(not(windows))]
+        {
+            self.pending_auto_scale = None;
+        }
+    }
+
+    fn apply_magpie_profile(&mut self) {
+        let Some(path) = magpie_scaling_modes_path() else {
+            self.status = "Bundled Magpie was not found.".to_string();
+            return;
+        };
+
+        let was_running = self.magpie_is_running();
+        if was_running {
+            self.stop_magpie();
+        }
+
+        let result = (|| -> Result<(), Box<dyn Error + Send + Sync>> {
+            let mut root = if path.is_file() {
+                serde_json::from_str::<serde_json::Value>(&fs::read_to_string(&path)?)?
+            } else {
+                serde_json::json!({})
+            };
+            let object = root
+                .as_object_mut()
+                .ok_or("Magpie's ScalingModes.json must contain an object.")?;
+            let modes = object
+                .entry("scalingModes")
+                .or_insert_with(|| serde_json::json!([]))
+                .as_array_mut()
+                .ok_or("Magpie's scalingModes value must be an array.")?;
+            let profile = magpie_profile_json(
+                &self.magpie_preset,
+                self.magpie_scale,
+                self.magpie_sharpness,
+            );
+            let profile_name = profile["name"].as_str().unwrap_or_default();
+            if let Some(existing) = modes
+                .iter_mut()
+                .find(|mode| mode["name"].as_str() == Some(profile_name))
+            {
+                *existing = profile;
+            } else {
+                modes.push(profile);
+            }
+            fs::write(&path, serde_json::to_string_pretty(&root)?)?;
+            Ok(())
+        })();
+
+        if was_running {
+            self.start_magpie();
+        }
+        match result {
+            Ok(()) => {
+                let _ = self.save_app_state();
+                self.status = format!(
+                    "Applied the {} Magpie profile. Select 'Emulator Hub - {}' in Magpie.",
+                    self.magpie_preset, self.magpie_preset
+                );
+            }
+            Err(error) => self.status = format!("Could not apply Magpie profile: {error}"),
+        }
     }
 
     fn import_rom_paths(&mut self, paths: Vec<PathBuf>) {
@@ -1650,13 +2064,25 @@ impl App {
             return;
         }
 
+        if self.magpie_enabled && (self.magpie_auto_start || self.magpie_auto_scale) {
+            self.start_magpie();
+        }
+
         let mut command = Command::new(&emulator.executable_path);
         // Keep options before the ROM path for conventional command-line
         // parsers that expect "[options] file".
         append_launch_arguments(&mut command, &emulator.settings, &emulator.executable_path);
         command.arg(&rom.source_path);
         match command.spawn() {
-            Ok(_) => {
+            Ok(child) => {
+                if self.magpie_enabled && self.magpie_auto_scale {
+                    let now = Instant::now();
+                    self.pending_auto_scale = Some(PendingAutoScale {
+                        process_id: child.id(),
+                        not_before: now + Duration::from_millis(self.magpie_auto_scale_delay_ms),
+                        expires_at: now + Duration::from_secs(15),
+                    });
+                }
                 let timestamp = now_timestamp();
                 if let Err(error) = self.db.execute(
                     "
@@ -1974,6 +2400,204 @@ impl App {
         self.status = format!("Editing settings for '{}'.", emulator.name);
     }
 
+    fn show_upscaling_tab(&mut self, ui: &mut Ui) {
+        ui.label(RichText::new("Upscaling").size(22.0).strong());
+        ui.label(
+            RichText::new("Use the bundled Magpie companion to scale emulator windows.")
+                .color(TEXT_MUTED),
+        );
+        ui.add_space(12.0);
+
+        card_frame(PANEL_BACKGROUND, Color32::from_rgb(42, 61, 73)).show(ui, |ui| {
+            let executable = bundled_magpie_path();
+            let running = self.magpie_is_running();
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("MAGPIE").small().color(TEXT_MUTED).strong());
+                ui.label(
+                    RichText::new(if running { "Running" } else { "Stopped" }).color(if running {
+                        ACCENT_GREEN
+                    } else {
+                        TEXT_MUTED
+                    }),
+                );
+            });
+            ui.label(
+                RichText::new(
+                    executable
+                        .as_ref()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_else(|| "Bundled Magpie executable not found".to_string()),
+                )
+                .small()
+                .color(if executable.is_some() {
+                    TEXT_MUTED
+                } else {
+                    DANGER
+                }),
+            );
+            ui.add_space(8.0);
+
+            let mut settings_changed = false;
+            settings_changed |= ui
+                .checkbox(&mut self.magpie_enabled, "Enable Magpie integration")
+                .changed();
+            settings_changed |= ui
+                .add_enabled(
+                    self.magpie_enabled,
+                    egui::Checkbox::new(
+                        &mut self.magpie_auto_start,
+                        "Start Magpie automatically when launching a ROM",
+                    ),
+                )
+                .changed();
+            settings_changed |= ui
+                .add_enabled(
+                    self.magpie_enabled,
+                    egui::Checkbox::new(
+                        &mut self.magpie_auto_scale,
+                        "Automatically apply scaling when a ROM window opens",
+                    ),
+                )
+                .changed();
+            ui.horizontal(|ui| {
+                ui.label("Auto-scale hotkey: Alt+Shift+");
+                settings_changed |= ui
+                    .add_enabled(
+                        self.magpie_enabled && self.magpie_auto_scale,
+                        TextEdit::singleline(&mut self.magpie_hotkey_key)
+                            .desired_width(40.0)
+                            .char_limit(1),
+                    )
+                    .changed();
+                ui.label("Delay:");
+                settings_changed |= ui
+                    .add_enabled(
+                        self.magpie_enabled && self.magpie_auto_scale,
+                        egui::Slider::new(&mut self.magpie_auto_scale_delay_ms, 500..=10_000)
+                            .suffix(" ms"),
+                    )
+                    .changed();
+            });
+            ui.label(
+                RichText::new(
+                    "Set the same Alt+Shift+key in Magpie once. Emulator Hub will focus the \
+                     emulator window and send that shortcut automatically after launch.",
+                )
+                .small()
+                .color(TEXT_MUTED),
+            );
+
+            ui.separator();
+            ui.label(RichText::new("Emulator Hub profile").strong());
+            let previous_preset = self.magpie_preset.clone();
+            ComboBox::from_id_salt(Id::new("magpie_preset"))
+                .selected_text(
+                    MAGPIE_PRESETS
+                        .iter()
+                        .find(|(name, _)| *name == self.magpie_preset)
+                        .map(|(name, description)| format!("{name} — {description}"))
+                        .unwrap_or_else(|| self.magpie_preset.clone()),
+                )
+                .show_ui(ui, |ui| {
+                    for (name, description) in MAGPIE_PRESETS {
+                        ui.selectable_value(
+                            &mut self.magpie_preset,
+                            (*name).to_string(),
+                            format!("{name} — {description}"),
+                        );
+                    }
+                });
+            let scale_changed = ui
+                .add(
+                    egui::Slider::new(&mut self.magpie_scale, 1.0..=4.0)
+                        .text("Scale multiplier")
+                        .clamping(egui::SliderClamping::Always),
+                )
+                .changed();
+            let sharpness_changed = ui
+                .add(
+                    egui::Slider::new(&mut self.magpie_sharpness, 0.0..=1.0)
+                        .text("Sharpening")
+                        .clamping(egui::SliderClamping::Always),
+                )
+                .changed();
+            if previous_preset != self.magpie_preset || scale_changed || sharpness_changed {
+                settings_changed = true;
+            }
+            ui.label(
+                RichText::new(
+                    "Apply Profile writes a reusable Magpie scaling mode. Effects such as \
+                     Anime4K and xBRZ use their own fixed scaling behavior.",
+                )
+                .small()
+                .color(TEXT_MUTED),
+            );
+
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(executable.is_some(), egui::Button::new("Start Magpie"))
+                    .clicked()
+                {
+                    self.start_magpie();
+                }
+                if ui
+                    .add_enabled(running, egui::Button::new("Stop Magpie"))
+                    .clicked()
+                {
+                    self.stop_magpie();
+                }
+                if ui
+                    .add_enabled(executable.is_some(), egui::Button::new("Apply Profile"))
+                    .clicked()
+                {
+                    self.apply_magpie_profile();
+                }
+            });
+
+            if !self.magpie_enabled && running {
+                self.stop_magpie();
+            }
+            if settings_changed {
+                if let Err(error) = self.save_app_state() {
+                    self.status = format!("Could not save upscaling settings: {error}");
+                } else if self.magpie_enabled {
+                    self.status = "Upscaling settings saved.".to_string();
+                }
+            }
+        });
+
+        ui.add_space(12.0);
+        card_frame(PANEL_RAISED, Color32::from_rgb(42, 61, 73)).show(ui, |ui| {
+            ui.label(RichText::new("How to use it").strong());
+            ui.add_space(4.0);
+            ui.label(
+                "1. Start a ROM in windowed mode.\n\
+                 2. Choose a profile and scale multiplier, then click Apply Profile.\n\
+                 3. Start Magpie here, or enable automatic startup.\n\
+                 4. Select the emulator window and use Magpie's configured scaling hotkey.\n\
+                 5. Configure advanced filters and hotkeys inside Magpie when needed.",
+            );
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new(
+                    "Magpie remains a separate background process because it captures and scales \
+                     the emulator window. Emulator Hub starts and stops the bundled copy for you.",
+                )
+                .small()
+                .color(TEXT_MUTED),
+            );
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new(
+                    "Bundled Magpie is provided under its own open-source license. See the \
+                     installed tools\\Magpie\\LICENSE.txt file.",
+                )
+                .small()
+                .color(TEXT_MUTED),
+            );
+        });
+    }
+
     fn modern_visible_roms(&self) -> Vec<Rom> {
         let query = self.search_query.trim().to_lowercase();
         self.roms
@@ -2031,6 +2655,15 @@ impl App {
         ui.add_space(6.0);
         if ui
             .selectable_label(
+                self.tab == Tab::Upscaling,
+                RichText::new("↗  Upscaling").size(14.0),
+            )
+            .clicked()
+        {
+            self.tab = Tab::Upscaling;
+        }
+        if ui
+            .selectable_label(
                 self.tab == Tab::Settings,
                 RichText::new("⚙  Settings").size(14.0),
             )
@@ -2059,6 +2692,7 @@ impl App {
             ui.label(
                 RichText::new(match self.tab {
                     Tab::Main => "Library",
+                    Tab::Upscaling => "Upscaling",
                     Tab::Settings => "Settings",
                 })
                 .strong()
@@ -2067,6 +2701,7 @@ impl App {
             ui.label(
                 RichText::new(match self.tab {
                     Tab::Main => "Manage your emulators and ROM collection",
+                    Tab::Upscaling => "Scale emulator windows with bundled Magpie",
                     Tab::Settings => "Configure launch behavior and updates",
                 })
                 .small()
@@ -2819,6 +3454,10 @@ fn append_launch_arguments(
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut EFrame) {
+        self.process_pending_auto_scale();
+        if self.pending_auto_scale.is_some() {
+            ui.ctx().request_repaint_after(Duration::from_millis(100));
+        }
         Panel::left("modern_navigation")
             .resizable(false)
             .default_size(190.0)
@@ -2831,6 +3470,7 @@ impl eframe::App for App {
             .frame(Frame::new().fill(APP_BACKGROUND).inner_margin(18))
             .show(ui, |ui| match self.tab {
                 Tab::Main => self.show_modern_main(ui),
+                Tab::Upscaling => self.show_upscaling_tab(ui),
                 Tab::Settings => {
                     ui.label(RichText::new("Settings").size(22.0).strong());
                     ui.label(
@@ -2848,6 +3488,7 @@ impl eframe::App for App {
 impl Drop for App {
     fn drop(&mut self) {
         let _ = self.save_app_state();
+        self.stop_magpie();
     }
 }
 

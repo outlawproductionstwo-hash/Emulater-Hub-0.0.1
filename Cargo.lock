@@ -953,7 +953,7 @@ dependencies = [
 
 [[package]]
 name = "emulator_hub_gui"
-version = "0.0.4"
+version = "0.0.5-alpha.1"
 dependencies = [
  "eframe",
  "egui",
