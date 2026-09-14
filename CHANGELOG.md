@@ -4,22 +4,28 @@
 
 ### Added
 
-- Added an **Upscaling** tab above Settings.
-- Bundled the portable Magpie companion with the Windows installer, including
-  its executable, required Windows runtime files, effects, and license text.
-- Added controls to start and stop Magpie from Emulator Hub.
-- Added an option to start Magpie automatically when launching a ROM.
-- Added in-app Magpie profile controls for FSR, Anime4K, CAS, xBRZ, Lanczos,
-  and Nearest scaling modes.
-- Added a configurable scale multiplier and automatic `ScalingModes.json`
-  profile generation.
-- Added an in-app sharpening control for FSR and CAS profiles.
-- Added automatic scaling after ROM launch by focusing the emulator window and
-  sending the configured Magpie hotkey.
-- Persisted the Magpie integration preferences in the SQLite app state.
-- Added setup guidance explaining the Magpie companion workflow, hotkey
-  configuration, automatic-start behavior, and where bundled Magpie files are
-  installed.
+- Added a dedicated **Upscaling** tab above Settings.
+- Bundled portable Magpie files with the Emulator Hub installer.
+- Added automatic detection of the bundled Magpie executable.
+- Added controls to start and stop Magpie directly from Emulator Hub.
+- Magpie now closes automatically when Emulator Hub exits.
+- Added optional automatic Magpie startup when launching ROMs.
+- Added automatic scaling after a ROM window opens.
+- Automatically focuses the emulator window before scaling.
+- Sends the configured `Alt+Shift+key` scaling shortcut automatically.
+- Added a configurable auto-scaling delay for slower emulators.
+- Added configurable hotkey letters, including `Alt+Shift+A`.
+- Added built-in scaling profiles for FSR, Anime4K, CAS, xBRZ, Lanczos, and
+  Nearest.
+- Added scale multiplier control.
+- Added sharpening control for profiles that support it.
+- Generates reusable Magpie `ScalingModes.json` profiles.
+- Automatically restarts Magpie when a new profile is applied.
+- Persists Magpie preferences in the Emulator Hub SQLite database.
+- Added automatic-scaling guidance inside the Upscaling tab.
+- Added full Magpie installer support for version 0.0.5-alpha1.
+- Excludes Magpie runtime cache and log files from release installers.
+- Includes Magpie license and attribution files with the installation.
 
 ### Attribution and licensing
 
