@@ -8,13 +8,9 @@
   A Windows desktop library for organizing emulators and ROMs in one place.
 </p>
 
+## Version 0.0.2
 
-Emulator Hub GUI is a Windows desktop library for organizing emulators and
-ROMs in one place.
-
-## Version 0.0.1
-
-This is the first public release.
+This release adds a per-user Windows installer.
 
 ## Features
 
@@ -29,15 +25,23 @@ This is the first public release.
 - Check for updates from GitHub Releases.
 - Verify downloaded updates with SHA-256 before installing them.
 
-## Download and run
+## Download and install
 
-Download the Windows executable from the GitHub Release assets:
+Download the installer from the GitHub Release assets:
 
 ```text
-EmulatorHub-v0.0.1-windows-x86_64.exe
+EmulatorHub-v0.0.2-Setup.exe
 ```
 
-Run the executable directly. No installer is required for version 0.0.1.
+The installer places the app in:
+
+```text
+%LOCALAPPDATA%\Programs\EmulatorHub
+```
+
+It creates Start Menu and desktop shortcuts and installs the Microsoft Visual
+C++ runtime required by native Windows dependencies. A standalone executable
+is also published for portable use.
 
 ## Using Emulator Hub
 
@@ -73,7 +77,7 @@ Build the application:
 
 ```powershell
 cd emulator_hub_gui
-cargo build --release
+cargo build --locked --release
 ```
 
 The executable is created at:
@@ -86,13 +90,13 @@ Run checks with:
 
 ```powershell
 cargo fmt -- --check
-cargo check
-cargo test
+cargo check --locked
+cargo test --locked
 ```
 
 ## Updates
 
-The updater checks the latest stable GitHub Release from **Settings → Check
+The updater checks the latest stable GitHub Release from **Settings -> Check
 for Updates**. Release builds receive the repository name automatically from
 the GitHub Actions workflow.
 
@@ -111,13 +115,16 @@ matching tag:
 
 ```powershell
 git add .
-git commit -m "Release Emulator Hub 0.0.1"
-git tag v0.0.1
+git commit -m "Release Emulator Hub 0.0.2"
+git tag v0.0.2
 git push origin main --tags
 ```
 
-The workflow in `.github/workflows/release.yml` builds the Windows executable
-and publishes a SHA-256 checksum alongside it.
+The workflow in `.github/workflows/release.yml` builds and publishes:
+
+- The standalone Windows executable.
+- The Windows installer.
+- A SHA-256 checksum for each file.
 
 See [`RELEASING.md`](RELEASING.md) for more details.
 
