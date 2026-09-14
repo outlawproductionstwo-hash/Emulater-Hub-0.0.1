@@ -98,6 +98,25 @@ It is managed as a background companion process rather than linked into the
 Emulator Hub executable. Its license is included at
 `tools\Magpie\LICENSE.txt`.
 
+## Credits
+
+<details>
+<summary>Show / hide</summary>
+
+This project uses and bundles the following open-source companion:
+
+| Contributor | Contribution |
+| --- | --- |
+| [Magpie](https://github.com/Blinue/Magpie) project and contributors | Open-source Windows upscaling companion used by Emulator Hub to provide FSR, Anime4K, CAS, xBRZ, Lanczos, and Nearest scaling profiles. |
+
+Magpie remains a separate companion process and is not linked into the
+Emulator Hub executable. Bundled Magpie files remain licensed under the
+[GNU General Public License version 3 (GPLv3)](installer/Magpie/LICENSE.txt).
+The complete license is also installed with the application at
+`tools\Magpie\LICENSE.txt`.
+
+</details>
+
 ## Building from source
 
 ### Requirements
