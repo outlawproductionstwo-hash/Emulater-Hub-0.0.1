@@ -1,12 +1,14 @@
 use eframe::{self, Frame as EFrame, NativeOptions};
 use egui::{
-    Align, CentralPanel, Color32, ComboBox, Frame, Id, Layout, Panel, RichText, ScrollArea, Stroke,
-    TextEdit, Ui, Vec2, Visuals,
+    Align, Align2, CentralPanel, Color32, ComboBox, FontId, Frame, Id, Layout, Panel, RichText,
+    ScrollArea, Stroke, TextEdit, TextureHandle, Ui, Vec2, Visuals,
 };
+use image::ImageReader;
 use rfd::FileDialog;
 use rusqlite::{Connection, Transaction, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::error::Error;
 use std::fs;
 use std::io::Read;
@@ -16,10 +18,9 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const EXECUTABLE_EXTENSIONS: &[&str] = &["exe", "bat", "cmd", "com", "pif", "vbs", "wsf"];
-// Cargo uses a three-part semantic version for the package. The hotfix
-// release uses a fourth display/release component without changing the
-// package version used to build dependencies.
-const APP_VERSION: &str = "0.0.3.2";
+// Cargo keeps the package at three-part semver while the display/release
+// version can include a hotfix component.
+const APP_VERSION: &str = "0.0.4.1";
 const GITHUB_REPOSITORY: Option<&str> = option_env!("EMULATOR_HUB_GITHUB_REPOSITORY");
 
 fn app_icon() -> Option<egui::IconData> {
@@ -56,6 +57,60 @@ fn card_frame(fill: Color32, stroke: Color32) -> Frame {
         .stroke(Stroke::new(1.0, stroke))
         .corner_radius(egui::CornerRadius::same(10))
         .inner_margin(egui::Margin::same(12))
+}
+
+fn icon_label(value: &str) -> String {
+    let words: Vec<Vec<char>> = value
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(|word| word.chars().collect())
+        .collect();
+
+    let label: String = if words.len() > 1 {
+        words
+            .iter()
+            .take(3)
+            .filter_map(|word| word.first().copied())
+            .collect()
+    } else {
+        words
+            .first()
+            .map(|word| word.iter().take(3).collect())
+            .unwrap_or_else(|| "?".to_string())
+    };
+
+    label.to_uppercase()
+}
+
+fn accent_for_name(name: &str) -> Color32 {
+    const PALETTE: [Color32; 5] = [
+        Color32::from_rgb(71, 203, 232),
+        Color32::from_rgb(128, 157, 255),
+        Color32::from_rgb(191, 157, 255),
+        Color32::from_rgb(255, 188, 105),
+        Color32::from_rgb(75, 221, 190),
+    ];
+    let hash = name
+        .bytes()
+        .fold(0u8, |value, byte| value.wrapping_mul(31).wrapping_add(byte));
+    PALETTE[hash as usize % PALETTE.len()]
+}
+
+fn show_icon_tile(ui: &mut Ui, label: &str, accent: Color32, missing: bool) {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(46.0), egui::Sense::hover());
+    let color = if missing { DANGER } else { accent };
+    ui.painter()
+        .rect_filled(rect, egui::CornerRadius::same(9), color.gamma_multiply(0.2));
+    ui.painter().text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        label,
+        FontId::proportional(if label.len() > 2 { 12.0 } else { 15.0 }),
+        color,
+    );
+    if missing {
+        response.on_hover_text("The imported file or executable is missing");
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,6 +187,7 @@ struct Rom {
     source_path: String,
     platform_id: i64,
     platform_name: String,
+    cover_art_path: Option<String>,
     favorite: bool,
     last_played_at: Option<i64>,
     play_count: i64,
@@ -170,6 +226,7 @@ struct StoredState {
     home_dir: Option<PathBuf>,
     current_dir: Option<PathBuf>,
     emulator_dir: Option<PathBuf>,
+    artwork_api_key: String,
     default_settings: LaunchSettings,
     tab: Tab,
 }
@@ -213,6 +270,9 @@ struct App {
     search_query: String,
     library_filter: LibraryFilter,
     selected_rom_id: Option<i64>,
+    cover_art_textures: HashMap<String, TextureHandle>,
+    emulator_icon_textures: HashMap<String, TextureHandle>,
+    artwork_api_key: String,
 }
 
 fn database_path() -> PathBuf {
@@ -270,6 +330,24 @@ fn is_executable(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+fn is_non_emulator_executable(path: &Path) -> bool {
+    let stem = path
+        .file_stem()
+        .map(|value| value.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let has_sdl_suffix = stem
+        .split(['.', '-', '_', ' '])
+        .any(|part| matches!(part, "sdl" | "sdl2"));
+
+    stem == "sdl"
+        || stem.starts_with("sdl2")
+        || has_sdl_suffix
+        || stem.ends_with(".sdl")
+        || stem.ends_with(".sdl2")
+        || stem.starts_with("unins")
+        || stem.starts_with("uninstall")
+}
+
 fn file_metadata(path: &Path) -> (Option<i64>, Option<i64>) {
     let Ok(metadata) = fs::metadata(path) else {
         return (None, None);
@@ -299,6 +377,441 @@ fn platform_name_or_unknown(value: &str) -> String {
     }
 }
 
+fn is_unknown_platform(name: &str) -> bool {
+    name.trim().is_empty() || name.eq_ignore_ascii_case("unknown")
+}
+
+fn infer_rom_platform(path: &Path) -> Option<&'static str> {
+    let name = path
+        .file_stem()
+        .map(|value| value.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+
+    // ISO files are used by several consoles. Recognize known PS2 titles
+    // before falling back to the extension-based platform mapping.
+    if name.contains("god hand") || name.contains("godhand") {
+        return Some("PlayStation 2");
+    }
+
+    let extension = path.extension()?.to_string_lossy().to_ascii_lowercase();
+    let platform = match extension.as_str() {
+        "gba" => "Game Boy Advance",
+        "gbc" => "Game Boy Color",
+        "gb" => "Game Boy",
+        "nes" => "Nintendo Entertainment System",
+        "smc" | "sfc" => "Super Nintendo",
+        "n64" | "z64" | "v64" => "Nintendo 64",
+        "nds" => "Nintendo DS",
+        "3ds" | "cia" => "Nintendo 3DS",
+        "iso" | "gcm" | "rvz" => "Nintendo GameCube",
+        "wbfs" => "Nintendo Wii",
+        "ps1" | "psx" | "pbp" => "PlayStation",
+        "ps2" => "PlayStation 2",
+        "cso" => "PlayStation Portable",
+        "md" | "gen" | "smd" => "Sega Genesis",
+        "sms" => "Sega Master System",
+        "a26" => "Atari 2600",
+        "pce" => "TurboGrafx-16",
+        _ => {
+            // Imported archives do not expose the ROM extension in their
+            // filename. Keep the common Pokémon GBA archive names usable
+            // without requiring the user to re-import them manually.
+            if name.contains("pokemon")
+                && [
+                    "emerald",
+                    "ruby",
+                    "sapphire",
+                    "fire red",
+                    "firered",
+                    "leaf green",
+                    "leafgreen",
+                ]
+                .iter()
+                .any(|title| name.contains(title))
+            {
+                "Game Boy Advance"
+            } else {
+                return None;
+            }
+        }
+    };
+    Some(platform)
+}
+
+fn is_ambiguous_rom_platform(path: &Path) -> bool {
+    path.extension()
+        .map(|extension| extension.to_string_lossy().eq_ignore_ascii_case("iso"))
+        .unwrap_or(false)
+}
+
+fn infer_emulator_platform(name: &str, path: &Path) -> Option<&'static str> {
+    let value = format!(
+        "{} {}",
+        name.to_ascii_lowercase(),
+        path.to_string_lossy().to_ascii_lowercase()
+    );
+    if value.contains("mgba") || value.contains("visualboy") {
+        Some("Game Boy Advance")
+    } else if value.contains("dolphin") {
+        Some("Nintendo GameCube")
+    } else if value.contains("pcsx2") {
+        Some("PlayStation 2")
+    } else if value.contains("duckstation") {
+        Some("PlayStation")
+    } else if value.contains("ppsspp") {
+        Some("PlayStation Portable")
+    } else if value.contains("desmume") || value.contains("melonds") {
+        Some("Nintendo DS")
+    } else if value.contains("citra") {
+        Some("Nintendo 3DS")
+    } else if value.contains("yuzu") || value.contains("ryujinx") {
+        Some("Nintendo Switch")
+    } else if value.contains("project64") {
+        Some("Nintendo 64")
+    } else if value.contains("snes9x") {
+        Some("Super Nintendo")
+    } else if value.contains("nestopia") {
+        Some("Nintendo Entertainment System")
+    } else if value.contains("gens") {
+        Some("Sega Genesis")
+    } else {
+        None
+    }
+}
+
+fn cover_art_path_for_rom(path: &Path) -> Option<String> {
+    let parent = path.parent()?;
+    let stem = path.file_stem()?.to_string_lossy();
+    let mut candidates = Vec::new();
+    for extension in ["png", "jpg", "jpeg"] {
+        candidates.push(parent.join(format!("{stem}.{extension}")));
+        candidates.push(parent.join(format!("{stem}-cover.{extension}")));
+        candidates.push(parent.join(format!("{stem}_cover.{extension}")));
+        candidates.push(parent.join("covers").join(format!("{stem}.{extension}")));
+    }
+
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+        .map(|candidate| path_string(&candidate))
+}
+
+fn url_encode(value: &str) -> String {
+    value
+        .bytes()
+        .flat_map(|byte| {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+                vec![byte as char]
+            } else {
+                format!("%{byte:02X}").chars().collect()
+            }
+        })
+        .collect()
+}
+
+fn artwork_cache_directory() -> PathBuf {
+    let base = std::env::var_os("LOCALAPPDATA")
+        .or_else(|| std::env::var_os("APPDATA"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    base.join("EmulatorHub").join("artwork")
+}
+
+fn cached_artwork_path(url: &str) -> PathBuf {
+    let digest = Sha256::digest(url.as_bytes());
+    let hash = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let extension = url
+        .split('?')
+        .next()
+        .and_then(|value| value.rsplit('.').next())
+        .filter(|value| {
+            matches!(
+                (*value).to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg"
+            )
+        })
+        .unwrap_or("jpg");
+    artwork_cache_directory().join(format!("{hash}.{extension}"))
+}
+
+fn image_url_from_value(value: &serde_json::Value, base_url: Option<&str>) -> Option<String> {
+    match value {
+        serde_json::Value::Object(object) => {
+            for (key, child) in object {
+                let key_lower = key.to_ascii_lowercase();
+                if key_lower.contains("front")
+                    || key_lower.contains("boxart")
+                    || key_lower == "image"
+                    || key_lower == "url"
+                    || key_lower == "filename"
+                {
+                    if let Some(raw) = child.as_str() {
+                        if let Some(url) = normalize_image_url(raw, base_url) {
+                            return Some(url);
+                        }
+                    }
+                }
+            }
+            object
+                .values()
+                .find_map(|child| image_url_from_value(child, base_url))
+        }
+        serde_json::Value::Array(array) => array
+            .iter()
+            .find_map(|child| image_url_from_value(child, base_url)),
+        _ => None,
+    }
+}
+
+fn normalize_image_url(value: &str, base_url: Option<&str>) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if value.starts_with("http://") || value.starts_with("https://") {
+        return Some(value.to_string());
+    }
+    if value.starts_with("//") {
+        return Some(format!("https:{value}"));
+    }
+    base_url.map(|base| {
+        format!(
+            "{}/{}",
+            base.trim_end_matches('/'),
+            value.trim_start_matches('/')
+        )
+    })
+}
+
+fn find_original_image_base_url(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Object(object) => {
+            if let Some(original) = object.get("original").and_then(|item| item.as_str()) {
+                if original.starts_with("http://") || original.starts_with("https://") {
+                    return Some(original.to_string());
+                }
+            }
+            object.values().find_map(find_original_image_base_url)
+        }
+        serde_json::Value::Array(array) => array.iter().find_map(find_original_image_base_url),
+        _ => None,
+    }
+}
+
+fn artwork_search_terms(title: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    let add_term = |terms: &mut Vec<String>, value: String| {
+        let value = value.split(['(', '[']).next().unwrap_or(&value);
+        let value = value.replace(" - ", " ").replace("  ", " ");
+        let value = value.trim().to_string();
+        if !value.is_empty() && !terms.iter().any(|term| term.eq_ignore_ascii_case(&value)) {
+            terms.push(value);
+        }
+    };
+
+    add_term(&mut terms, title.to_string());
+    add_term(&mut terms, title.replace('-', " "));
+    terms
+}
+
+fn first_game_id(value: &serde_json::Value) -> Option<i64> {
+    value
+        .get("data")?
+        .get("games")?
+        .as_array()?
+        .first()?
+        .get("id")?
+        .as_i64()
+}
+
+fn fetch_artwork_url(
+    api_key: &str,
+    title: &str,
+    _platform: &str,
+) -> Result<Option<String>, Box<dyn Error + Send + Sync>> {
+    for search_term in artwork_search_terms(title) {
+        let search_url = format!(
+            "https://api.thegamesdb.net/v1/Games/ByGameName?apikey={}&name={}&include=boxart",
+            url_encode(api_key),
+            url_encode(&search_term),
+        );
+        let payload: serde_json::Value = ureq::get(&search_url)
+            .set("User-Agent", "EmulatorHub/0.0.4.1")
+            .call()?
+            .into_json()?;
+        let base_url = find_original_image_base_url(&payload);
+        if let Some(url) = image_url_from_value(&payload, base_url.as_deref()) {
+            return Ok(Some(url));
+        }
+
+        if let Some(game_id) = first_game_id(&payload) {
+            let images_url = format!(
+                "https://api.thegamesdb.net/v1/Games/Images?apikey={}&games_id={game_id}",
+                url_encode(api_key)
+            );
+            let images: serde_json::Value = ureq::get(&images_url)
+                .set("User-Agent", "EmulatorHub/0.0.4.1")
+                .call()?
+                .into_json()?;
+            let base_url = find_original_image_base_url(&images);
+            if let Some(url) = image_url_from_value(&images, base_url.as_deref()) {
+                return Ok(Some(url));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn download_artwork(url: &str) -> Result<PathBuf, Box<dyn Error + Send + Sync>> {
+    let path = cached_artwork_path(url);
+    if path.is_file() {
+        return Ok(path);
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut bytes = Vec::new();
+    ureq::get(url)
+        .set("User-Agent", "EmulatorHub/0.0.4.1")
+        .call()?
+        .into_reader()
+        .read_to_end(&mut bytes)?;
+    fs::write(&path, bytes)?;
+    Ok(path)
+}
+
+#[cfg(windows)]
+fn extract_executable_icon(executable_path: &Path) -> Option<egui::ColorImage> {
+    use std::mem::size_of;
+    use std::os::windows::ffi::OsStrExt;
+    use std::ptr::null_mut;
+    use windows_sys::Win32::Graphics::Gdi::{
+        BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, GetDC, GetDIBits, GetObjectW,
+        ReleaseDC,
+    };
+    use windows_sys::Win32::UI::Shell::ExtractIconExW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICON, ICONINFO};
+
+    let path: Vec<u16> = executable_path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut large_icon: HICON = null_mut();
+    let mut small_icon: HICON = null_mut();
+    let extracted =
+        unsafe { ExtractIconExW(path.as_ptr(), 0, &mut large_icon, &mut small_icon, 1) };
+    if extracted == 0 {
+        return None;
+    }
+    let icon = if !large_icon.is_null() {
+        large_icon
+    } else {
+        small_icon
+    };
+    if icon.is_null() {
+        return None;
+    }
+
+    let mut icon_info = ICONINFO::default();
+    let success = unsafe { GetIconInfo(icon, &mut icon_info) };
+    if success == 0 || icon_info.hbmColor.is_null() {
+        unsafe {
+            if !large_icon.is_null() {
+                DestroyIcon(large_icon);
+            }
+            if !small_icon.is_null() {
+                DestroyIcon(small_icon);
+            }
+        }
+        return None;
+    }
+
+    let mut bitmap = BITMAP::default();
+    let bitmap_size = unsafe {
+        GetObjectW(
+            icon_info.hbmColor,
+            size_of::<BITMAP>() as i32,
+            (&mut bitmap as *mut BITMAP).cast(),
+        )
+    };
+    if bitmap_size == 0 || bitmap.bmWidth <= 0 || bitmap.bmHeight <= 0 {
+        unsafe {
+            DestroyIcon(large_icon);
+            if !small_icon.is_null() {
+                DestroyIcon(small_icon);
+            }
+        }
+        return None;
+    }
+
+    let width = bitmap.bmWidth as usize;
+    let height = bitmap.bmHeight as usize;
+    let mut pixels = vec![0u8; width.saturating_mul(height).saturating_mul(4)];
+    let mut bitmap_info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: bitmap.bmWidth,
+            biHeight: -(bitmap.bmHeight),
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: 0,
+            ..BITMAPINFOHEADER::default()
+        },
+        bmiColors: [Default::default()],
+    };
+    let device_context = unsafe { GetDC(null_mut()) };
+    let copied = unsafe {
+        GetDIBits(
+            device_context,
+            icon_info.hbmColor,
+            0,
+            bitmap.bmHeight as u32,
+            pixels.as_mut_ptr().cast(),
+            &mut bitmap_info,
+            DIB_RGB_COLORS,
+        )
+    };
+    if !device_context.is_null() {
+        unsafe {
+            ReleaseDC(null_mut(), device_context);
+        }
+    }
+
+    unsafe {
+        windows_sys::Win32::Graphics::Gdi::DeleteObject(icon_info.hbmColor);
+        if !icon_info.hbmMask.is_null() {
+            windows_sys::Win32::Graphics::Gdi::DeleteObject(icon_info.hbmMask);
+        }
+        DestroyIcon(large_icon);
+        if !small_icon.is_null() {
+            DestroyIcon(small_icon);
+        }
+    }
+    if copied == 0 {
+        return None;
+    }
+
+    for pixel in pixels.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+        if pixel[3] == 0 {
+            pixel[3] = 255;
+        }
+    }
+    Some(egui::ColorImage::from_rgba_unmultiplied(
+        [width, height],
+        &pixels,
+    ))
+}
+
+#[cfg(not(windows))]
+fn extract_executable_icon(_executable_path: &Path) -> Option<egui::ColorImage> {
+    None
+}
+
 fn init_schema(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch(
         "
@@ -319,7 +832,8 @@ fn init_schema(connection: &Connection) -> rusqlite::Result<()> {
             default_resolution_width INTEGER NOT NULL DEFAULT 1920,
             default_resolution_height INTEGER NOT NULL DEFAULT 1080,
             default_res_width_arg TEXT NOT NULL DEFAULT '-width',
-            default_res_height_arg TEXT NOT NULL DEFAULT '-height'
+            default_res_height_arg TEXT NOT NULL DEFAULT '-height',
+            artwork_api_key TEXT
         );
 
         INSERT OR IGNORE INTO app_state (id) VALUES (1);
@@ -366,6 +880,18 @@ fn init_schema(connection: &Connection) -> rusqlite::Result<()> {
         );
         ",
     )
+}
+
+fn ensure_app_state_columns(connection: &Connection) -> rusqlite::Result<()> {
+    let column_exists: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('app_state') WHERE name = 'artwork_api_key'",
+        [],
+        |row| row.get(0),
+    )?;
+    if column_exists == 0 {
+        connection.execute("ALTER TABLE app_state ADD COLUMN artwork_api_key TEXT", [])?;
+    }
+    Ok(())
 }
 
 fn read_legacy_config() -> Result<LegacyConfig, Box<dyn Error + Send + Sync>> {
@@ -482,14 +1008,89 @@ fn migrate_legacy_config(connection: &Connection) -> rusqlite::Result<String> {
     Ok(status)
 }
 
+fn repair_library_metadata(connection: &mut Connection) -> rusqlite::Result<()> {
+    let mut rom_statement = connection.prepare(
+        "
+        SELECT r.id, r.source_path, p.name, r.cover_art_path
+        FROM roms r
+        JOIN platforms p ON p.id = r.platform_id
+        ",
+    )?;
+    let roms: Vec<(i64, String, String, Option<String>)> = rom_statement
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    drop(rom_statement);
+
+    let mut emulator_statement = connection.prepare(
+        "
+        SELECT e.id, e.name, e.executable_path, p.name
+        FROM emulators e
+        JOIN platforms p ON p.id = e.platform_id
+        ",
+    )?;
+    let emulators: Vec<(i64, String, String, String)> = emulator_statement
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    drop(emulator_statement);
+
+    let transaction = connection.transaction()?;
+    for (id, source_path, platform_name, cover_art_path) in roms {
+        let path = Path::new(&source_path);
+        let should_repair_platform = is_unknown_platform(&platform_name)
+            || (is_ambiguous_rom_platform(path)
+                && infer_rom_platform(path) == Some("PlayStation 2"));
+        if should_repair_platform {
+            if let Some(inferred_platform) = infer_rom_platform(path) {
+                let platform_id =
+                    get_or_create_platform(&transaction, inferred_platform, now_timestamp())?;
+                transaction.execute(
+                    "UPDATE roms SET platform_id = ?, updated_at = ? WHERE id = ?",
+                    params![platform_id, now_timestamp(), id],
+                )?;
+            }
+        }
+        if cover_art_path.is_none() {
+            if let Some(cover_art_path) = cover_art_path_for_rom(path) {
+                transaction.execute(
+                    "UPDATE roms SET cover_art_path = ?, updated_at = ? WHERE id = ?",
+                    params![cover_art_path, now_timestamp(), id],
+                )?;
+            }
+        }
+    }
+
+    for (id, name, executable_path, platform_name) in emulators {
+        if is_unknown_platform(&platform_name) {
+            if let Some(inferred_platform) =
+                infer_emulator_platform(&name, Path::new(&executable_path))
+            {
+                let platform_id =
+                    get_or_create_platform(&transaction, inferred_platform, now_timestamp())?;
+                transaction.execute(
+                    "UPDATE emulators SET platform_id = ?, updated_at = ? WHERE id = ?",
+                    params![platform_id, now_timestamp(), id],
+                )?;
+            }
+        }
+    }
+
+    transaction.commit()
+}
+
 fn open_database() -> Result<(Connection, String), Box<dyn Error + Send + Sync>> {
     let path = database_path();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let connection = Connection::open(path)?;
+    let mut connection = Connection::open(path)?;
     init_schema(&connection)?;
+    ensure_app_state_columns(&connection)?;
     let migration_status = migrate_legacy_config(&connection)?;
+    repair_library_metadata(&mut connection)?;
     Ok((connection, migration_status))
 }
 
@@ -501,7 +1102,7 @@ fn read_stored_state(connection: &Connection) -> rusqlite::Result<StoredState> {
                default_borderless_enabled, default_borderless_arg,
                default_resolution_enabled, default_resolution_width,
                default_resolution_height, default_res_width_arg,
-               default_res_height_arg
+               default_res_height_arg, artwork_api_key
         FROM app_state WHERE id = 1
         ",
         [],
@@ -511,6 +1112,7 @@ fn read_stored_state(connection: &Connection) -> rusqlite::Result<StoredState> {
                 home_dir: row.get::<_, Option<String>>(0)?.map(PathBuf::from),
                 current_dir: row.get::<_, Option<String>>(1)?.map(PathBuf::from),
                 emulator_dir: row.get::<_, Option<String>>(2)?.map(PathBuf::from),
+                artwork_api_key: row.get::<_, Option<String>>(13)?.unwrap_or_default(),
                 tab: if selected_tab == "Settings" {
                     Tab::Settings
                 } else {
@@ -579,11 +1181,28 @@ fn load_emulators(connection: &Connection) -> rusqlite::Result<Vec<Emulator>> {
     rows.collect()
 }
 
+fn remove_non_emulator_entries(connection: &Connection) -> rusqlite::Result<usize> {
+    connection.execute(
+        "
+        DELETE FROM emulators
+        WHERE lower(name) = 'sdl'
+           OR lower(name) LIKE 'sdl2%'
+           OR lower(name) LIKE '%sdl'
+           OR lower(name) LIKE '%sdl2'
+           OR lower(name) LIKE '%.sdl'
+           OR lower(name) LIKE '%.sdl2'
+           OR lower(name) LIKE 'unins%'
+           OR lower(name) LIKE 'uninstall%'
+        ",
+        [],
+    )
+}
+
 fn load_roms(connection: &Connection) -> rusqlite::Result<Vec<Rom>> {
     let mut statement = connection.prepare(
         "
         SELECT r.id, r.title, r.source_path, r.platform_id, p.name,
-               r.favorite, r.last_played_at, r.play_count
+               r.cover_art_path, r.favorite, r.last_played_at, r.play_count
         FROM roms r
         JOIN platforms p ON p.id = r.platform_id
         ORDER BY r.favorite DESC, r.title COLLATE NOCASE
@@ -596,9 +1215,10 @@ fn load_roms(connection: &Connection) -> rusqlite::Result<Vec<Rom>> {
             source_path: row.get(2)?,
             platform_id: row.get(3)?,
             platform_name: row.get(4)?,
-            favorite: row.get::<_, i64>(5)? != 0,
-            last_played_at: row.get(6)?,
-            play_count: row.get(7)?,
+            cover_art_path: row.get(5)?,
+            favorite: row.get::<_, i64>(6)? != 0,
+            last_played_at: row.get(7)?,
+            play_count: row.get(8)?,
         })
     })?;
     rows.collect()
@@ -763,6 +1383,10 @@ fn apply_update_helper(args: &[String]) -> Result<(), Box<dyn Error + Send + Syn
 impl App {
     fn new() -> Result<Self, Box<dyn Error + Send + Sync>> {
         let (db, migration_status) = open_database()?;
+        // Older builds could import helper executables such as SDL launchers
+        // and uninstaller programs when scanning an emulator folder. Remove
+        // those library entries once at startup so only actual emulators show.
+        remove_non_emulator_entries(&db)?;
         let stored_state = read_stored_state(&db)?;
         let current_dir = stored_state
             .current_dir
@@ -792,6 +1416,9 @@ impl App {
             search_query: String::new(),
             library_filter: LibraryFilter::All,
             selected_rom_id: None,
+            cover_art_textures: HashMap::new(),
+            emulator_icon_textures: HashMap::new(),
+            artwork_api_key: stored_state.artwork_api_key,
         };
         app.refresh_from_db()?;
         Ok(app)
@@ -834,7 +1461,8 @@ impl App {
                 default_resolution_width = ?10,
                 default_resolution_height = ?11,
                 default_res_width_arg = ?12,
-                default_res_height_arg = ?13
+                default_res_height_arg = ?13,
+                artwork_api_key = ?14
             WHERE id = 1
             ",
             params![
@@ -851,33 +1479,40 @@ impl App {
                 self.default_settings.resolution_height as i64,
                 self.default_settings.res_width_arg,
                 self.default_settings.res_height_arg,
+                self.artwork_api_key.trim(),
             ],
         )?;
         Ok(())
     }
 
     fn import_rom_paths(&mut self, paths: Vec<PathBuf>) {
-        let platform_name = platform_name_or_unknown(&self.platform_input);
+        let requested_platform = platform_name_or_unknown(&self.platform_input);
         let timestamp = now_timestamp();
         let result = (|| -> rusqlite::Result<usize> {
             let transaction = self.db.transaction()?;
-            let platform_id = get_or_create_platform(&transaction, &platform_name, timestamp)?;
             let mut imported = 0;
             for path in paths {
                 if !path.is_file() || is_executable(&path) {
                     continue;
                 }
+                let platform_name = if is_unknown_platform(&requested_platform) {
+                    infer_rom_platform(&path).unwrap_or("Unknown")
+                } else {
+                    requested_platform.as_str()
+                };
+                let platform_id = get_or_create_platform(&transaction, platform_name, timestamp)?;
                 let (file_size, modified_at) = file_metadata(&path);
                 transaction.execute(
                     "
                     INSERT INTO roms (
                         title, source_path, source_path_key, platform_id,
-                        file_size, modified_at, created_at, updated_at
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+                        cover_art_path, file_size, modified_at, created_at, updated_at
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
                     ON CONFLICT(source_path_key) DO UPDATE SET
                         title = excluded.title,
                         source_path = excluded.source_path,
                         platform_id = excluded.platform_id,
+                        cover_art_path = COALESCE(excluded.cover_art_path, roms.cover_art_path),
                         file_size = excluded.file_size,
                         modified_at = excluded.modified_at,
                         updated_at = excluded.updated_at
@@ -887,6 +1522,7 @@ impl App {
                         path_string(&path),
                         normalized_path_key(&path),
                         platform_id,
+                        cover_art_path_for_rom(&path),
                         file_size,
                         modified_at,
                         timestamp,
@@ -902,23 +1538,29 @@ impl App {
                 let _ = self.save_app_state();
                 let _ = self.refresh_from_db();
                 self.status = format!("Imported or updated {imported} ROM(s).");
+                self.auto_fetch_missing_artwork();
             }
             Err(error) => self.status = format!("ROM import failed: {error}"),
         }
     }
 
     fn import_emulator_paths(&mut self, paths: Vec<PathBuf>) {
-        let platform_name = platform_name_or_unknown(&self.platform_input);
+        let requested_platform = platform_name_or_unknown(&self.platform_input);
         let timestamp = now_timestamp();
         let defaults = self.default_settings.clone();
         let result = (|| -> rusqlite::Result<usize> {
             let transaction = self.db.transaction()?;
-            let platform_id = get_or_create_platform(&transaction, &platform_name, timestamp)?;
             let mut imported = 0;
             for path in paths {
-                if !path.is_file() || !is_executable(&path) {
+                if !path.is_file() || !is_executable(&path) || is_non_emulator_executable(&path) {
                     continue;
                 }
+                let platform_name = if is_unknown_platform(&requested_platform) {
+                    infer_emulator_platform(&title_from_path(&path), &path).unwrap_or("Unknown")
+                } else {
+                    requested_platform.as_str()
+                };
+                let platform_id = get_or_create_platform(&transaction, platform_name, timestamp)?;
                 transaction.execute(
                     "
                     INSERT INTO emulators (
@@ -1041,8 +1683,169 @@ impl App {
         ) {
             Ok(_) => {
                 let _ = self.refresh_from_db();
+                self.status = "Favorite status updated.".to_string();
             }
             Err(error) => self.status = format!("Could not update favorite: {error}"),
+        }
+    }
+
+    fn load_cover_art_texture(
+        &mut self,
+        context: &egui::Context,
+        cover_art_path: &str,
+    ) -> Option<TextureHandle> {
+        let cache_key = normalized_path_key(Path::new(cover_art_path));
+        if let Some(texture) = self.cover_art_textures.get(&cache_key) {
+            return Some(texture.clone());
+        }
+
+        let decoded = ImageReader::open(cover_art_path).ok()?.decode().ok()?;
+        let image = decoded.thumbnail(512, 512).to_rgba8();
+        let size = [image.width() as usize, image.height() as usize];
+        let color_image = egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw());
+        let texture = context.load_texture(
+            format!("rom-cover-{cache_key}"),
+            color_image,
+            egui::TextureOptions::LINEAR,
+        );
+        self.cover_art_textures.insert(cache_key, texture.clone());
+        Some(texture)
+    }
+
+    fn show_rom_visual(&mut self, ui: &mut Ui, rom: &Rom, missing: bool) {
+        if !missing {
+            if let Some(cover_art_path) = rom.cover_art_path.as_deref() {
+                if let Some(texture) = self.load_cover_art_texture(ui.ctx(), cover_art_path) {
+                    ui.add(
+                        egui::Image::from_texture(&texture).fit_to_exact_size(Vec2::splat(64.0)),
+                    );
+                    return;
+                }
+            }
+        }
+
+        let platform_icon = if missing {
+            "!".to_string()
+        } else {
+            icon_label(&rom.platform_name)
+        };
+        show_icon_tile(
+            ui,
+            &platform_icon,
+            accent_for_name(&rom.platform_name),
+            missing,
+        );
+    }
+
+    fn load_emulator_icon_texture(
+        &mut self,
+        context: &egui::Context,
+        executable_path: &str,
+    ) -> Option<TextureHandle> {
+        let cache_key = normalized_path_key(Path::new(executable_path));
+        if let Some(texture) = self.emulator_icon_textures.get(&cache_key) {
+            return Some(texture.clone());
+        }
+        let image = extract_executable_icon(Path::new(executable_path))?;
+        let texture = context.load_texture(
+            format!("emulator-icon-{cache_key}"),
+            image,
+            egui::TextureOptions::LINEAR,
+        );
+        self.emulator_icon_textures
+            .insert(cache_key, texture.clone());
+        Some(texture)
+    }
+
+    fn show_emulator_visual(&mut self, ui: &mut Ui, emulator: &Emulator, missing: bool) {
+        if !missing {
+            if let Some(texture) =
+                self.load_emulator_icon_texture(ui.ctx(), &emulator.executable_path)
+            {
+                ui.add(egui::Image::from_texture(&texture).fit_to_exact_size(Vec2::splat(46.0)));
+                return;
+            }
+        }
+
+        let emulator_icon = if missing {
+            "!".to_string()
+        } else {
+            icon_label(&emulator.name)
+        };
+        show_icon_tile(ui, &emulator_icon, accent_for_name(&emulator.name), missing);
+    }
+
+    fn set_cover_art(&mut self, rom_id: i64, cover_art_path: Option<PathBuf>) {
+        let path_text = cover_art_path.as_ref().map(|path| path_string(path));
+        match self.db.execute(
+            "UPDATE roms SET cover_art_path = ?1, updated_at = ?2 WHERE id = ?3",
+            params![path_text, now_timestamp(), rom_id],
+        ) {
+            Ok(_) => {
+                if let Some(path) = cover_art_path {
+                    self.cover_art_textures.remove(&normalized_path_key(&path));
+                    self.status = "ROM artwork updated.".to_string();
+                } else {
+                    self.status = "ROM artwork cleared.".to_string();
+                }
+                let _ = self.refresh_from_db();
+            }
+            Err(error) => self.status = format!("Could not update ROM artwork: {error}"),
+        }
+    }
+
+    fn fetch_artwork_for_rom(&mut self, rom_id: i64) {
+        let Some(rom) = self.roms.iter().find(|rom| rom.id == rom_id).cloned() else {
+            return;
+        };
+        let api_key = self.artwork_api_key.trim().to_string();
+        if api_key.is_empty() {
+            self.status =
+                "Add your TheGamesDB API key in Settings before fetching artwork.".to_string();
+            return;
+        }
+
+        self.status = format!("Finding artwork for '{}'...", rom.title);
+        match fetch_artwork_url(&api_key, &rom.title, &rom.platform_name) {
+            Ok(Some(url)) => match download_artwork(&url) {
+                Ok(path) => {
+                    let path_text = path_string(&path);
+                    match self.db.execute(
+                        "UPDATE roms SET cover_art_path = ?1, updated_at = ?2 WHERE id = ?3",
+                        params![path_text, now_timestamp(), rom.id],
+                    ) {
+                        Ok(_) => {
+                            self.cover_art_textures.remove(&normalized_path_key(&path));
+                            let _ = self.refresh_from_db();
+                            self.status = format!("Artwork downloaded for '{}'.", rom.title);
+                        }
+                        Err(error) => {
+                            self.status = format!("Could not save artwork path: {error}");
+                        }
+                    }
+                }
+                Err(error) => self.status = format!("Could not download artwork: {error}"),
+            },
+            Ok(None) => {
+                self.status = format!("No artwork found for '{}'.", rom.title);
+            }
+            Err(error) => self.status = format!("Artwork lookup failed: {error}"),
+        }
+    }
+
+    fn auto_fetch_missing_artwork(&mut self) {
+        if self.artwork_api_key.trim().is_empty() {
+            return;
+        }
+        let ids: Vec<i64> = self
+            .roms
+            .iter()
+            .filter(|rom| rom.cover_art_path.is_none())
+            .map(|rom| rom.id)
+            .take(10)
+            .collect();
+        for rom_id in ids {
+            self.fetch_artwork_for_rom(rom_id);
         }
     }
 
@@ -1292,17 +2095,12 @@ impl App {
 
         card_frame(PANEL_BACKGROUND, border).show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(if missing { "!" } else { "◈" })
-                        .size(22.0)
-                        .strong()
-                        .color(if missing { DANGER } else { ACCENT }),
-                );
+                self.show_rom_visual(ui, &rom, missing);
                 ui.vertical(|ui| {
                     ui.label(RichText::new(&rom.title).size(16.0).strong());
                     ui.label(
                         RichText::new(format!(
-                            "{}  •  {} plays",
+                            "{}  -  {} plays",
                             rom.platform_name, rom.play_count
                         ))
                         .small()
@@ -1311,7 +2109,11 @@ impl App {
                 });
                 ui.with_layout(Layout::right_to_left(Align::TOP), |ui| {
                     if ui
-                        .button(if rom.favorite { "★" } else { "☆" })
+                        .button(if rom.favorite {
+                            "\u{2605} Favorite"
+                        } else {
+                            "\u{2606} Favorite"
+                        })
                         .on_hover_text("Toggle favorite")
                         .clicked()
                     {
@@ -1331,7 +2133,7 @@ impl App {
             );
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if ui.button("▶  Play").clicked() {
+                if ui.button("Play").clicked() {
                     self.selected_rom_id = Some(rom.id);
                     self.launch_rom(rom.id);
                 }
@@ -1366,8 +2168,13 @@ impl App {
                 .cloned();
             if let Some(rom) = selected_rom {
                 let missing = !Path::new(&rom.source_path).exists();
-                ui.label(RichText::new(&rom.title).size(20.0).strong());
-                ui.label(RichText::new(&rom.platform_name).color(ACCENT));
+                ui.horizontal(|ui| {
+                    self.show_rom_visual(ui, &rom, missing);
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new(&rom.title).size(20.0).strong());
+                        ui.label(RichText::new(&rom.platform_name).color(ACCENT));
+                    });
+                });
                 ui.separator();
                 ui.label(
                     RichText::new("SOURCE FILE")
@@ -1380,7 +2187,24 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(format!("Played {}", rom.play_count)));
                     if rom.favorite {
-                        ui.label(RichText::new("★ Favorite").color(ACCENT_GREEN));
+                        ui.label(RichText::new("\u{2605} Favorite").color(ACCENT_GREEN));
+                    }
+                });
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Fetch artwork").clicked() {
+                        self.fetch_artwork_for_rom(rom.id);
+                    }
+                    if ui.button("Choose artwork").clicked() {
+                        if let Some(path) = FileDialog::new()
+                            .add_filter("Artwork", &["png", "jpg", "jpeg"])
+                            .pick_file()
+                        {
+                            self.set_cover_art(rom.id, Some(path));
+                        }
+                    }
+                    if rom.cover_art_path.is_some() && ui.button("Clear artwork").clicked() {
+                        self.set_cover_art(rom.id, None);
                     }
                 });
                 ui.add_space(8.0);
@@ -1390,7 +2214,7 @@ impl App {
                             .small()
                             .color(DANGER),
                     );
-                } else if ui.button("▶  Launch ROM").clicked() {
+                } else if ui.button("Launch ROM").clicked() {
                     self.launch_rom(rom.id);
                 }
             } else {
@@ -1420,13 +2244,7 @@ impl App {
                 for emulator in self.emulators.clone().into_iter().take(6) {
                     let missing = !Path::new(&emulator.executable_path).exists();
                     ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new(if missing { "!" } else { "●" }).color(if missing {
-                                DANGER
-                            } else {
-                                ACCENT_GREEN
-                            }),
-                        );
+                        self.show_emulator_visual(ui, &emulator, missing);
                         ui.vertical(|ui| {
                             ui.label(RichText::new(&emulator.name).strong());
                             ui.label(
@@ -1659,7 +2477,11 @@ impl App {
                             self.launch_rom(rom.id);
                         }
                         if ui
-                            .button(if rom.favorite { "★" } else { "☆" })
+                            .button(if rom.favorite {
+                                "\u{2605} Favorite"
+                            } else {
+                                "\u{2606} Favorite"
+                            })
                             .on_hover_text("Toggle favorite")
                             .clicked()
                         {
@@ -1772,6 +2594,35 @@ impl App {
                 self.install_update();
             }
         }
+        ui.separator();
+        ui.heading("ROM Artwork");
+        ui.label("Use a TheGamesDB API key to automatically download cover art.");
+        ui.horizontal(|ui| {
+            ui.label("API key:");
+            ui.add(
+                TextEdit::singleline(&mut self.artwork_api_key)
+                    .password(true)
+                    .desired_width(360.0),
+            );
+            if ui.button("Save Artwork Settings").clicked() {
+                match self.save_app_state() {
+                    Ok(()) => {
+                        self.status = "Artwork settings saved.".to_string();
+                        self.auto_fetch_missing_artwork();
+                    }
+                    Err(error) => {
+                        self.status = format!("Could not save artwork settings: {error}");
+                    }
+                }
+            }
+        });
+        ui.label(
+            RichText::new(
+                "Artwork is cached locally and can also be fetched from a selected ROM's details.",
+            )
+            .small()
+            .color(TEXT_MUTED),
+        );
         ui.separator();
         ui.label("Emulator folder:");
         ui.label(

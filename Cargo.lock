@@ -953,16 +953,18 @@ dependencies = [
 
 [[package]]
 name = "emulator_hub_gui"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "eframe",
  "egui",
+ "image",
  "rfd",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2",
  "ureq",
+ "windows-sys 0.61.2",
  "winres",
 ]
 
@@ -1609,6 +1611,8 @@ dependencies = [
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]

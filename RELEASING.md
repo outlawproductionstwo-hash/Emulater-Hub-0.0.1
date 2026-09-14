@@ -14,14 +14,14 @@ Release builds automatically receive the repository name through
 `EMULATOR_HUB_GITHUB_REPOSITORY`. Local builds will show an update-configuration
 error until that environment variable is set.
 
-## Publish version 0.0.3.2 hotfix
+## Publish version 0.0.4.1 hotfix
 
 From the repository root:
 
 ```powershell
 git add .
-git commit -m "Release Emulator Hub 0.0.3.2 hotfix"
-git tag v0.0.3.2
+git commit -m "Release Emulator Hub 0.0.4.1 hotfix"
+git tag v0.0.4.1
 git push origin main --tags
 ```
 
@@ -35,20 +35,18 @@ permission. The library database is stored separately at
 `%LOCALAPPDATA%\EmulatorHub\library.sqlite3` and is preserved when the app is
 uninstalled.
 
-Version 0.0.3.2 is a ROM-launching hotfix. It fixes emulator display-mode
-arguments so a ROM starts in the fullscreen or windowed mode selected in its
-launch settings, without changing the mode of the Emulator Hub application
-window itself.
+Version 0.0.4.1 is a hotfix for platform detection, ROM artwork, and the
+favorite button display.
 
 ## Publish a later update
 
 1. Update the display version in `src/main.rs` and the changelog, for example
-   to `0.0.4`.
+   to `0.0.5`.
 2. Commit the change.
 3. Create and push the matching tag:
 
 ```powershell
-git tag v0.0.4
+git tag v0.0.5
 git push origin main --tags
 ```
 
@@ -61,7 +59,7 @@ Install Inno Setup 6, then run:
 
 ```powershell
 cargo build --locked --release
-.\installer\build.ps1 -Version 0.0.3.2
+.\installer\build.ps1 -Version 0.0.4.1
 ```
 
 The script downloads `vc_redist.x64.exe` into the untracked `installer`

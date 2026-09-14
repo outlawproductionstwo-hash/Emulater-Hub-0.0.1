@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.0.2"
+    [string]$Version = "0.0.4.1"
 )
 
 $ErrorActionPreference = "Stop"
@@ -68,6 +68,12 @@ if (-not $isccPath) {
 }
 
 New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
+$standalone = Join-Path $outputDir "EmulatorHub-v$Version-windows-x86_64.exe"
+Copy-Item (Join-Path $targetDir "emulator_hub_gui.exe") $standalone -Force
+$standaloneHash = (Get-FileHash $standalone -Algorithm SHA256).Hash.ToLower()
+"$standaloneHash  $(Split-Path $standalone -Leaf)" |
+    Set-Content "$standalone.sha256"
+
 & $isccPath `
     "/DMyAppVersion=$Version" `
     "/DSourceDir=$targetDir" `

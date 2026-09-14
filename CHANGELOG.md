@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.0.4.1] - 2026-09-14
+
+### Added
+
+- Added automatic ROM artwork lookup through TheGamesDB using the ROM title.
+- Added a Settings field for the user's TheGamesDB API key.
+- Added artwork caching under `%LOCALAPPDATA%\EmulatorHub\artwork` so
+  downloaded artwork is reused between launches.
+- Added local artwork discovery beside ROM files and manual artwork selection
+  from the ROM details panel.
+- Added Windows executable icon extraction for imported emulators, with the
+  existing initials tile retained as a fallback.
+- Added cleanup for helper executables that are not emulators, including SDL
+  launchers and uninstaller files.
+
+### Fixed
+
+- Fixed the favorite button displaying corrupted symbols.
+- Fixed existing ROM and emulator records remaining assigned to `Unknown`
+  when their platform can be inferred.
+- Fixed known PlayStation 2 ISO titles such as `God Hand` being misidentified
+  as GameCube games.
+- Added platform repair for archived Pokemon GBA ROM names such as Emerald,
+  Ruby, Sapphire, FireRed, and LeafGreen.
+- Prevented SDL/SDL2 variants such as `mgba-sdl` from appearing as emulators
+  after an emulator-folder import.
+
+## [0.0.4] - 2026-09-14
+
+### Added
+
+- Added styled icon tiles beside ROMs using platform initials.
+- Added styled icon tiles beside emulators using emulator initials.
+- Added colored platform and emulator accents with missing-file indicators.
+- Added the first library visuals for quickly distinguishing ROM and emulator
+  entries.
+
 ## [0.0.3.2] - 2026-09-14
 
 ### Fixed

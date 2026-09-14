@@ -2,7 +2,7 @@
 #define MyAppPublisher "Emulator Hub"
 
 #ifndef MyAppVersion
-  #define MyAppVersion "0.0.2"
+  #define MyAppVersion "0.0.4.1"
 #endif
 
 #ifndef SourceDir

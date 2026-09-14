@@ -8,9 +8,10 @@
   A Windows desktop library for organizing emulators and ROMs in one place.
 </p>
 
-## Version 0.0.3.2
+## Version 0.0.4.1
 
-This hotfix improves fullscreen and windowed-mode handling when launching ROMs.
+This hotfix adds automatic platform detection, ROM artwork support, and fixes
+the favorite button display.
 
 ## Features
 
@@ -24,13 +25,19 @@ This hotfix improves fullscreen and windowed-mode handling when launching ROMs.
 - Detect missing emulator and ROM files without deleting their records.
 - Check for updates from GitHub Releases.
 - Verify downloaded updates with SHA-256 before installing them.
+- Show platform initials next to ROMs and emulator initials next to emulators.
+- Automatically detect common ROM and emulator platforms when the platform is
+  left as Unknown.
+- Load matching local ROM artwork and allow artwork to be selected manually.
+- Optionally download ROM artwork automatically from TheGamesDB using a
+  user-provided API key.
 
 ## Download and install
 
 Download the installer from the GitHub Release assets:
 
 ```text
-EmulatorHub-v0.0.3.2-Setup.exe
+EmulatorHub-v0.0.4.1-Setup.exe
 ```
 
 The installer places the app in:
@@ -115,8 +122,8 @@ matching tag:
 
 ```powershell
 git add .
-git commit -m "Release Emulator Hub 0.0.3.2 hotfix"
-git tag v0.0.3.2
+git commit -m "Release Emulator Hub 0.0.4.1"
+git tag v0.0.4.1
 git push origin main --tags
 ```
 
