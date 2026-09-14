@@ -616,11 +616,21 @@ fn fetch_latest_update() -> Result<Option<AvailableUpdate>, Box<dyn Error + Send
         return Ok(None);
     }
 
-    let Some(executable) = release.assets.iter().find(|asset| {
-        asset.name.starts_with("EmulatorHub-")
-            && asset.name.ends_with(".exe")
-            && !asset.name.ends_with(".sha256")
-    }) else {
+    // Releases also contain the Setup.exe installer. The updater must select
+    // the portable application executable, not the installer, because it
+    // replaces the currently running binary in place.
+    let expected_executable = format!("EmulatorHub-{}-windows-x86_64.exe", release.tag_name);
+    let Some(executable) = release
+        .assets
+        .iter()
+        .find(|asset| asset.name == expected_executable)
+        .or_else(|| {
+            release
+                .assets
+                .iter()
+                .find(|asset| asset.name.ends_with("-windows-x86_64.exe"))
+        })
+    else {
         return Err("The latest release has no Windows executable asset.".into());
     };
 

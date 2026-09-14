@@ -22,22 +22,64 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Build release executable
-        run: cargo build --release
+        run: cargo build --locked --release
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress --yes
+
+      - name: Download Microsoft Visual C++ runtime
+        shell: pwsh
+        run: |
+          $vcRedist = Join-Path $env:RUNNER_TEMP "vc_redist.x64.exe"
+          Invoke-WebRequest `
+            -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" `
+            -OutFile $vcRedist
+          "VC_REDIST=$vcRedist" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Prepare release assets
         shell: pwsh
         run: |
-          $version = "${{ github.ref_name }}"
-          $asset = "EmulatorHub-$version-windows-x86_64.exe"
-          Copy-Item "target\release\emulator_hub_gui.exe" $asset
-          $hash = (Get-FileHash $asset -Algorithm SHA256).Hash.ToLower()
-          "$hash  $asset" | Set-Content "$asset.sha256"
-          "RELEASE_ASSET=$asset" | Out-File -FilePath $env:GITHUB_ENV -Append
+          $tag = "${{ github.ref_name }}"
+          $version = $tag.TrimStart("v")
+          $exeAsset = "release\EmulatorHub-$tag-windows-x86_64.exe"
+          $installerAsset = "release\EmulatorHub-$tag-Setup.exe"
+          New-Item -ItemType Directory -Force -Path "release" | Out-Null
+          Copy-Item "target\release\emulator_hub_gui.exe" $exeAsset
+
+          $inno = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $inno)) {
+            throw "Inno Setup compiler was not found at $inno"
+          }
+          & $inno `
+            "/DMyAppVersion=$version" `
+            "/DSourceDir=$((Resolve-Path 'target\release').Path)" `
+            "/DOutputDir=$((Resolve-Path 'release').Path)" `
+            "/DVCRedistPath=$env:VC_REDIST" `
+            "installer\EmulatorHub.iss"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Inno Setup failed with exit code $LASTEXITCODE"
+          }
+
+          foreach ($asset in @($exeAsset, $installerAsset)) {
+            if (-not (Test-Path $asset)) {
+              throw "Expected release asset was not created: $asset"
+            }
+            $hash = (Get-FileHash $asset -Algorithm SHA256).Hash.ToLower()
+            "$hash  $(Split-Path $asset -Leaf)" | Set-Content "$asset.sha256"
+          }
+          "EXE_ASSET=$exeAsset" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "EXE_CHECKSUM=$exeAsset.sha256" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "INSTALLER_ASSET=$installerAsset" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "INSTALLER_CHECKSUM=$installerAsset.sha256" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          body_path: CHANGELOG.md
+          generate_release_notes: false
           files: |
-            ${{ env.RELEASE_ASSET }}
-            ${{ env.RELEASE_ASSET }}.sha256
+            ${{ env.EXE_ASSET }}
+            ${{ env.EXE_CHECKSUM }}
+            ${{ env.INSTALLER_ASSET }}
+            ${{ env.INSTALLER_CHECKSUM }}
