@@ -20,7 +20,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const EXECUTABLE_EXTENSIONS: &[&str] = &["exe", "bat", "cmd", "com", "pif", "vbs", "wsf"];
 // Cargo keeps the package at three-part semver while the display/release
 // version can include a hotfix component.
-const APP_VERSION: &str = "0.0.4.1";
+const APP_VERSION: &str = "0.0.4.2";
 const GITHUB_REPOSITORY: Option<&str> = option_env!("EMULATOR_HUB_GITHUB_REPOSITORY");
 
 fn app_icon() -> Option<egui::IconData> {
@@ -639,7 +639,7 @@ fn fetch_artwork_url(
             url_encode(&search_term),
         );
         let payload: serde_json::Value = ureq::get(&search_url)
-            .set("User-Agent", "EmulatorHub/0.0.4.1")
+            .set("User-Agent", "EmulatorHub/0.0.4.2")
             .call()?
             .into_json()?;
         let base_url = find_original_image_base_url(&payload);
@@ -653,7 +653,7 @@ fn fetch_artwork_url(
                 url_encode(api_key)
             );
             let images: serde_json::Value = ureq::get(&images_url)
-                .set("User-Agent", "EmulatorHub/0.0.4.1")
+                .set("User-Agent", "EmulatorHub/0.0.4.2")
                 .call()?
                 .into_json()?;
             let base_url = find_original_image_base_url(&images);
@@ -675,7 +675,7 @@ fn download_artwork(url: &str) -> Result<PathBuf, Box<dyn Error + Send + Sync>> 
     }
     let mut bytes = Vec::new();
     ureq::get(url)
-        .set("User-Agent", "EmulatorHub/0.0.4.1")
+        .set("User-Agent", "EmulatorHub/0.0.4.2")
         .call()?
         .into_reader()
         .read_to_end(&mut bytes)?;
@@ -2266,6 +2266,163 @@ impl App {
     }
 
     fn show_modern_main(&mut self, ui: &mut Ui) {
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Your collection").size(22.0).strong());
+            ui.label(
+                RichText::new(match self.library_filter {
+                    LibraryFilter::All => "All imported ROMs",
+                    LibraryFilter::Favorites => "Favorite ROMs",
+                })
+                .color(TEXT_MUTED),
+            );
+        });
+        ui.add_space(10.0);
+
+        let visible_roms = self.modern_visible_roms();
+        ui.columns(2, |columns| {
+            columns[0].vertical(|ui| {
+                card_frame(PANEL_RAISED, Color32::from_rgb(42, 61, 73)).show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new("PLATFORM").small().color(TEXT_MUTED).strong());
+                        ui.add_sized(
+                            [190.0, 30.0],
+                            TextEdit::singleline(&mut self.platform_input)
+                                .hint_text("NES, SNES, PlayStation"),
+                        );
+                        ui.separator();
+                        if ui.button("+  Import ROMs").clicked() {
+                            if let Some(paths) = FileDialog::new().pick_files() {
+                                self.import_rom_paths(paths);
+                            }
+                        }
+                        if ui.button("+  ROM folder").clicked() {
+                            self.import_rom_folder();
+                        }
+                        if ui.button("+  Emulator").clicked() {
+                            if let Some(path) = FileDialog::new().pick_file() {
+                                self.import_emulator_paths(vec![path]);
+                            }
+                        }
+                        if ui.button("+  Emulator folder").clicked() {
+                            self.import_emulator_folder();
+                        }
+                    });
+                });
+
+                ui.add_space(10.0);
+                ui.horizontal_wrapped(|ui| {
+                    for (label, value, color) in [
+                        ("ROMs", self.roms.len(), ACCENT),
+                        (
+                            "Favorites",
+                            self.roms.iter().filter(|rom| rom.favorite).count(),
+                            ACCENT_GREEN,
+                        ),
+                        (
+                            "Emulators",
+                            self.emulators.len(),
+                            Color32::from_rgb(191, 157, 255),
+                        ),
+                        (
+                            "Platforms",
+                            self.platforms.len(),
+                            Color32::from_rgb(255, 188, 105),
+                        ),
+                    ] {
+                        card_frame(PANEL_BACKGROUND, Color32::from_rgb(42, 61, 73)).show(
+                            ui,
+                            |ui| {
+                                ui.label(RichText::new(label).small().color(TEXT_MUTED));
+                                ui.label(
+                                    RichText::new(value.to_string())
+                                        .size(24.0)
+                                        .strong()
+                                        .color(color),
+                                );
+                            },
+                        );
+                    }
+                });
+
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("ROM LIBRARY")
+                            .small()
+                            .color(TEXT_MUTED)
+                            .strong(),
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(RichText::new(visible_roms.len().to_string()).color(ACCENT));
+                    });
+                });
+                ui.add_space(8.0);
+                ScrollArea::vertical().max_height(480.0).show(ui, |ui| {
+                    if visible_roms.is_empty() {
+                        card_frame(PANEL_BACKGROUND, Color32::from_rgb(42, 61, 73)).show(
+                            ui,
+                            |ui| {
+                                ui.label(
+                                    RichText::new(if self.roms.is_empty() {
+                                        "Import your first ROM to start building the library."
+                                    } else {
+                                        "No ROMs match the current search or filter."
+                                    })
+                                    .color(TEXT_MUTED),
+                                );
+                            },
+                        );
+                    } else {
+                        ui.columns(2, |cards| {
+                            for (index, rom) in visible_roms.iter().cloned().enumerate() {
+                                Self::show_modern_rom_card(self, &mut cards[index % 2], rom);
+                                cards[index % 2].add_space(10.0);
+                            }
+                        });
+                    }
+                });
+            });
+            columns[1].vertical(|ui| {
+                self.show_modern_details(ui);
+                self.show_modern_emulators(ui);
+            });
+        });
+
+        // Keep navigation controls at the bottom of the available content area
+        // instead of directly under the library cards.
+        let footer_height = 34.0;
+        let remaining_height = ui.available_height() - footer_height;
+        if remaining_height > 0.0 {
+            ui.add_space(remaining_height);
+        }
+        ui.separator();
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Home").clicked() {
+                if let Some(home) = &self.home_dir {
+                    self.current_dir = home.clone();
+                    let _ = self.save_app_state();
+                }
+            }
+            if ui.button("Go up").clicked() && self.current_dir.pop() {
+                let _ = self.save_app_state();
+            }
+            if ui.button("Refresh library").clicked() {
+                let _ = self.refresh_from_db();
+            }
+            ui.label(RichText::new(&self.status).small().color(TEXT_MUTED));
+            if !self.current_dir.as_os_str().is_empty() {
+                ui.label(
+                    RichText::new(format!("Current directory: {}", self.current_dir.display()))
+                        .small()
+                        .color(TEXT_MUTED),
+                );
+            }
+        });
+    }
+
+    #[allow(dead_code)]
+    fn show_modern_main_legacy(&mut self, ui: &mut Ui) {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             ui.label(RichText::new("Your collection").size(22.0).strong());

@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.0.4.2] - 2026-09-14
+
+### Changed
+
+- Reorganized the main library screen so selected ROM details and emulator
+  controls appear higher and align more naturally with the ROM library.
+- Anchored the Home, Go Up, and Refresh Library controls at the bottom of the
+  main content area.
+- Grouped import controls and library statistics with the ROM library column
+  for a cleaner dashboard layout.
+
 ## [0.0.4.1] - 2026-09-14
 
 ### Added

@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.0.4.1"
+    [string]$Version = "0.0.4.2"
 )
 
 $ErrorActionPreference = "Stop"
@@ -36,8 +36,17 @@ function Archive-OldReleaseFiles {
     Compress-Archive -LiteralPath $oldFiles.FullName -DestinationPath $archivePath -CompressionLevel Optimal
 
     if (Test-Path $archivePath) {
-        $oldFiles | Remove-Item -Force
-        Write-Host "Archived $($oldFiles.Count) old release file(s) to $archivePath"
+        $removedFiles = @()
+        foreach ($oldFile in $oldFiles) {
+            try {
+                Remove-Item -LiteralPath $oldFile.FullName -Force -ErrorAction Stop
+                $removedFiles += $oldFile
+            }
+            catch {
+                Write-Warning "Could not remove $($oldFile.Name). Close Emulator Hub and remove it later."
+            }
+        }
+        Write-Host "Archived $($removedFiles.Count) old release file(s) to $archivePath"
     }
 }
 

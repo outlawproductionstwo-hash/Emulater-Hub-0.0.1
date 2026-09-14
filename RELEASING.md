@@ -14,14 +14,14 @@ Release builds automatically receive the repository name through
 `EMULATOR_HUB_GITHUB_REPOSITORY`. Local builds will show an update-configuration
 error until that environment variable is set.
 
-## Publish version 0.0.4.1 hotfix
+## Publish version 0.0.4.2 hotfix
 
 From the repository root:
 
 ```powershell
 git add .
-git commit -m "Release Emulator Hub 0.0.4.1 hotfix"
-git tag v0.0.4.1
+git commit -m "Release Emulator Hub 0.0.4.2 hotfix"
+git tag v0.0.4.2
 git push origin main --tags
 ```
 
@@ -35,8 +35,7 @@ permission. The library database is stored separately at
 `%LOCALAPPDATA%\EmulatorHub\library.sqlite3` and is preserved when the app is
 uninstalled.
 
-Version 0.0.4.1 is a hotfix for platform detection, ROM artwork, and the
-favorite button display.
+Version 0.0.4.2 is a hotfix for the cleaned-up main library layout.
 
 ## Publish a later update
 
@@ -59,7 +58,7 @@ Install Inno Setup 6, then run:
 
 ```powershell
 cargo build --locked --release
-.\installer\build.ps1 -Version 0.0.4.1
+.\installer\build.ps1 -Version 0.0.4.2
 ```
 
 The script downloads `vc_redist.x64.exe` into the untracked `installer`

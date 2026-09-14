@@ -8,10 +8,10 @@
   A Windows desktop library for organizing emulators and ROMs in one place.
 </p>
 
-## Version 0.0.4.1
+## Version 0.0.4.2
 
-This hotfix adds automatic platform detection, ROM artwork support, and fixes
-the favorite button display.
+This hotfix cleans up the main library layout, moving selected ROM details and
+emulator controls higher while keeping library navigation at the bottom.
 
 ## Features
 
@@ -37,7 +37,7 @@ the favorite button display.
 Download the installer from the GitHub Release assets:
 
 ```text
-EmulatorHub-v0.0.4.1-Setup.exe
+EmulatorHub-v0.0.4.2-Setup.exe
 ```
 
 The installer places the app in:
@@ -122,8 +122,8 @@ matching tag:
 
 ```powershell
 git add .
-git commit -m "Release Emulator Hub 0.0.4.1"
-git tag v0.0.4.1
+git commit -m "Release Emulator Hub 0.0.4.2"
+git tag v0.0.4.2
 git push origin main --tags
 ```
 
