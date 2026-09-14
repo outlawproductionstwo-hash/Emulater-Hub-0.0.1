@@ -1,4 +1,13 @@
-# Emulator Hub GUI
+<p align="center">
+  <img src="assets/eframe_icon.png" alt="Emulator Hub icon" width="180">
+</p>
+
+<h1 align="center">Emulator Hub</h1>
+
+<p align="center">
+  A Windows desktop library for organizing emulators and ROMs in one place.
+</p>
+
 
 Emulator Hub GUI is a Windows desktop library for organizing emulators and
 ROMs in one place.
