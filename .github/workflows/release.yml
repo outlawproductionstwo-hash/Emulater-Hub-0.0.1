@@ -22,7 +22,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Build release executable
-        working-directory: emulator_hub_gui
         run: cargo build --release
 
       - name: Prepare release assets
@@ -30,7 +29,7 @@ jobs:
         run: |
           $version = "${{ github.ref_name }}"
           $asset = "EmulatorHub-$version-windows-x86_64.exe"
-          Copy-Item "emulator_hub_gui\target\release\emulator_hub_gui.exe" $asset
+          Copy-Item "target\release\emulator_hub_gui.exe" $asset
           $hash = (Get-FileHash $asset -Algorithm SHA256).Hash.ToLower()
           "$hash  $asset" | Set-Content "$asset.sha256"
           "RELEASE_ASSET=$asset" | Out-File -FilePath $env:GITHUB_ENV -Append
