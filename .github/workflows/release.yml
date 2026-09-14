@@ -73,11 +73,23 @@ jobs:
           "INSTALLER_ASSET=$installerAsset" | Out-File -FilePath $env:GITHUB_ENV -Append
           "INSTALLER_CHECKSUM=$installerAsset.sha256" | Out-File -FilePath $env:GITHUB_ENV -Append
 
+      - name: Prepare version-specific release notes
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          $changelog = Get-Content "CHANGELOG.md" -Raw
+          $pattern = "(?ms)^## \[$([regex]::Escape($version))\].*?(?=^## \[|\z)"
+          $match = [regex]::Match($changelog, $pattern)
+          if (-not $match.Success) {
+            throw "No changelog section was found for version $version"
+          }
+          $match.Value.Trim() | Set-Content "release-notes.md"
+
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
           name: EmulatorHub ${{ github.ref_name }}
-          body_path: CHANGELOG.md
+          body_path: release-notes.md
           generate_release_notes: false
           files: |
             ${{ env.EXE_ASSET }}
