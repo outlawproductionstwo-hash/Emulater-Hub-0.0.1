@@ -1,0 +1,44 @@
+name: Build and release Emulator Hub
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    env:
+      EMULATOR_HUB_GITHUB_REPOSITORY: ${{ github.repository }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release executable
+        working-directory: emulator_hub_gui
+        run: cargo build --release
+
+      - name: Prepare release assets
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}"
+          $asset = "EmulatorHub-$version-windows-x86_64.exe"
+          Copy-Item "emulator_hub_gui\target\release\emulator_hub_gui.exe" $asset
+          $hash = (Get-FileHash $asset -Algorithm SHA256).Hash.ToLower()
+          "$hash  $asset" | Set-Content "$asset.sha256"
+          "RELEASE_ASSET=$asset" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            ${{ env.RELEASE_ASSET }}
+            ${{ env.RELEASE_ASSET }}.sha256
