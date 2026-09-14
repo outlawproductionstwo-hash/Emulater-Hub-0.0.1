@@ -114,4 +114,4 @@ See [`RELEASING.md`](RELEASING.md) for more details.
 
 ## License
 
-No license has been selected for this project yet.
+This project is licensed under the [MIT License](LICENSE).
