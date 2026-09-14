@@ -9,6 +9,40 @@ $outputDir = Join-Path $root "release"
 $vcRedist = Join-Path $PSScriptRoot "vc_redist.x64.exe"
 $installerScript = Join-Path $PSScriptRoot "EmulatorHub.iss"
 
+function Archive-OldReleaseFiles {
+    param(
+        [string]$KeepVersion
+    )
+
+    if (-not (Test-Path $outputDir)) {
+        return
+    }
+
+    $oldFiles = Get-ChildItem -LiteralPath $outputDir -File |
+        Where-Object {
+            $_.Name -like "EmulatorHub-*" -and
+            $_.Name -notlike "*$KeepVersion*" -and
+            $_.Extension -in @(".exe", ".sha256")
+        }
+
+    if (-not $oldFiles) {
+        return
+    }
+
+    $archiveDir = Join-Path $outputDir "archive"
+    New-Item -ItemType Directory -Force -Path $archiveDir | Out-Null
+    $archiveName = "EmulatorHub-old-releases-{0}.zip" -f (Get-Date -Format "yyyyMMdd-HHmmss")
+    $archivePath = Join-Path $archiveDir $archiveName
+    Compress-Archive -LiteralPath $oldFiles.FullName -DestinationPath $archivePath -CompressionLevel Optimal
+
+    if (Test-Path $archivePath) {
+        $oldFiles | Remove-Item -Force
+        Write-Host "Archived $($oldFiles.Count) old release file(s) to $archivePath"
+    }
+}
+
+Archive-OldReleaseFiles -KeepVersion $Version
+
 if (-not (Test-Path (Join-Path $targetDir "emulator_hub_gui.exe"))) {
     throw "Release executable not found. Run 'cargo build --locked --release' first."
 }

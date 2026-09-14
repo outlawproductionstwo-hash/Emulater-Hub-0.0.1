@@ -1,5 +1,8 @@
 use eframe::{self, Frame as EFrame, NativeOptions};
-use egui::{CentralPanel, ComboBox, Frame, Id, ScrollArea, Stroke, TextEdit, Ui};
+use egui::{
+    Align, CentralPanel, Color32, ComboBox, Frame, Id, Layout, Panel, RichText, ScrollArea, Stroke,
+    TextEdit, Ui, Vec2, Visuals,
+};
 use rfd::FileDialog;
 use rusqlite::{Connection, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -13,11 +16,46 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const EXECUTABLE_EXTENSIONS: &[&str] = &["exe", "bat", "cmd", "com", "pif", "vbs", "wsf"];
-const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+// Cargo uses a three-part semantic version for the package. The hotfix
+// release uses a fourth display/release component without changing the
+// package version used to build dependencies.
+const APP_VERSION: &str = "0.0.3.2";
 const GITHUB_REPOSITORY: Option<&str> = option_env!("EMULATOR_HUB_GITHUB_REPOSITORY");
 
 fn app_icon() -> Option<egui::IconData> {
     eframe::icon_data::from_png_bytes(include_bytes!("../assets/eframe_icon.png")).ok()
+}
+
+fn configure_theme(ctx: &egui::Context) {
+    let mut visuals = Visuals::dark();
+    visuals.panel_fill = APP_BACKGROUND;
+    visuals.window_fill = PANEL_BACKGROUND;
+    visuals.extreme_bg_color = Color32::from_rgb(7, 12, 17);
+    visuals.faint_bg_color = Color32::from_rgb(14, 22, 30);
+    visuals.selection.bg_fill = ACCENT;
+    visuals.selection.stroke.color = APP_BACKGROUND;
+    visuals.hyperlink_color = ACCENT;
+    visuals.widgets.noninteractive.bg_fill = PANEL_BACKGROUND;
+    visuals.widgets.inactive.bg_fill = PANEL_RAISED;
+    visuals.widgets.hovered.bg_fill = Color32::from_rgb(34, 58, 70);
+    visuals.widgets.active.bg_fill = ACCENT;
+    visuals.widgets.active.fg_stroke.color = APP_BACKGROUND;
+    visuals.widgets.open.bg_fill = Color32::from_rgb(28, 47, 57);
+    ctx.set_visuals(visuals);
+
+    let mut style = (*ctx.style_of(egui::Theme::Dark)).clone();
+    style.spacing.item_spacing = Vec2::new(10.0, 8.0);
+    style.spacing.button_padding = Vec2::new(11.0, 7.0);
+    style.visuals.override_text_color = Some(TEXT_PRIMARY);
+    ctx.set_style_of(egui::Theme::Dark, style);
+}
+
+fn card_frame(fill: Color32, stroke: Color32) -> Frame {
+    Frame::new()
+        .fill(fill)
+        .stroke(Stroke::new(1.0, stroke))
+        .corner_radius(egui::CornerRadius::same(10))
+        .inner_margin(egui::Margin::same(12))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +63,21 @@ enum Tab {
     Main,
     Settings,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LibraryFilter {
+    All,
+    Favorites,
+}
+
+const APP_BACKGROUND: Color32 = Color32::from_rgb(10, 16, 23);
+const PANEL_BACKGROUND: Color32 = Color32::from_rgb(17, 25, 34);
+const PANEL_RAISED: Color32 = Color32::from_rgb(22, 32, 43);
+const ACCENT: Color32 = Color32::from_rgb(71, 203, 232);
+const ACCENT_GREEN: Color32 = Color32::from_rgb(75, 221, 190);
+const TEXT_PRIMARY: Color32 = Color32::from_rgb(235, 243, 248);
+const TEXT_MUTED: Color32 = Color32::from_rgb(146, 165, 178);
+const DANGER: Color32 = Color32::from_rgb(244, 117, 117);
 
 #[derive(Debug, Clone)]
 struct LaunchSettings {
@@ -55,6 +108,7 @@ impl Default for LaunchSettings {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct Platform {
     id: i64,
@@ -156,6 +210,9 @@ struct App {
     selected_emulator_id: Option<i64>,
     editing_settings: LaunchSettings,
     pending_update: Option<AvailableUpdate>,
+    search_query: String,
+    library_filter: LibraryFilter,
+    selected_rom_id: Option<i64>,
 }
 
 fn database_path() -> PathBuf {
@@ -573,13 +630,15 @@ fn enumerate_files(folder: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-fn version_tuple(version: &str) -> Option<(u64, u64, u64)> {
+fn version_tuple(version: &str) -> Option<(u64, u64, u64, u64)> {
     let version = version.trim().trim_start_matches('v');
+    let version = version.split('-').next()?;
     let mut parts = version.split('.');
     Some((
         parts.next()?.parse().ok()?,
         parts.next()?.parse().ok()?,
-        parts.next()?.split('-').next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+        parts.next().unwrap_or("0").parse().ok()?,
     ))
 }
 
@@ -730,6 +789,9 @@ impl App {
             selected_emulator_id: None,
             editing_settings: default_settings,
             pending_update: None,
+            search_query: String::new(),
+            library_filter: LibraryFilter::All,
+            selected_rom_id: None,
         };
         app.refresh_from_db()?;
         Ok(app)
@@ -947,8 +1009,10 @@ impl App {
         }
 
         let mut command = Command::new(&emulator.executable_path);
+        // Keep options before the ROM path for conventional command-line
+        // parsers that expect "[options] file".
+        append_launch_arguments(&mut command, &emulator.settings, &emulator.executable_path);
         command.arg(&rom.source_path);
-        append_launch_arguments(&mut command, &emulator.settings);
         match command.spawn() {
             Ok(_) => {
                 let timestamp = now_timestamp();
@@ -1087,6 +1151,449 @@ impl App {
         }
     }
 
+    fn open_emulator_settings(&mut self, emulator_id: i64) {
+        let Some(emulator) = self
+            .emulators
+            .iter()
+            .find(|emulator| emulator.id == emulator_id)
+            .cloned()
+        else {
+            return;
+        };
+
+        // Configure can be opened directly from the home screen. Explicitly
+        // load the selected emulator's profile here instead of waiting for the
+        // settings ComboBox to change, otherwise the page can still show the
+        // default profile while the emulator is selected.
+        self.selected_emulator_id = Some(emulator.id);
+        self.editing_settings = emulator.settings;
+        self.tab = Tab::Settings;
+        self.status = format!("Editing settings for '{}'.", emulator.name);
+    }
+
+    fn modern_visible_roms(&self) -> Vec<Rom> {
+        let query = self.search_query.trim().to_lowercase();
+        self.roms
+            .iter()
+            .filter(|rom| {
+                let matches_filter = match self.library_filter {
+                    LibraryFilter::All => true,
+                    LibraryFilter::Favorites => rom.favorite,
+                };
+                let matches_search = query.is_empty()
+                    || rom.title.to_lowercase().contains(&query)
+                    || rom.platform_name.to_lowercase().contains(&query);
+                matches_filter && matches_search
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn show_modern_sidebar(&mut self, ui: &mut Ui) {
+        ui.add_space(18.0);
+        ui.label(
+            RichText::new("EMULATOR HUB")
+                .strong()
+                .color(ACCENT)
+                .size(16.0),
+        );
+        ui.label(RichText::new("Your game library").small().color(TEXT_MUTED));
+        ui.add_space(24.0);
+        ui.label(RichText::new("LIBRARY").small().color(TEXT_MUTED).strong());
+        ui.add_space(6.0);
+
+        if ui
+            .selectable_label(
+                self.tab == Tab::Main && self.library_filter == LibraryFilter::All,
+                RichText::new("▦  Library").size(14.0),
+            )
+            .clicked()
+        {
+            self.tab = Tab::Main;
+            self.library_filter = LibraryFilter::All;
+        }
+        if ui
+            .selectable_label(
+                self.tab == Tab::Main && self.library_filter == LibraryFilter::Favorites,
+                RichText::new("★  Favorites").size(14.0),
+            )
+            .clicked()
+        {
+            self.tab = Tab::Main;
+            self.library_filter = LibraryFilter::Favorites;
+        }
+
+        ui.add_space(20.0);
+        ui.label(RichText::new("TOOLS").small().color(TEXT_MUTED).strong());
+        ui.add_space(6.0);
+        if ui
+            .selectable_label(
+                self.tab == Tab::Settings,
+                RichText::new("⚙  Settings").size(14.0),
+            )
+            .clicked()
+        {
+            self.tab = Tab::Settings;
+        }
+
+        ui.with_layout(Layout::bottom_up(Align::LEFT), |ui| {
+            ui.separator();
+            ui.label(
+                RichText::new(format!("Version {APP_VERSION}"))
+                    .small()
+                    .color(TEXT_MUTED),
+            );
+            ui.label(
+                RichText::new("SQLite library connected")
+                    .small()
+                    .color(ACCENT_GREEN),
+            );
+        });
+    }
+
+    fn show_modern_top_bar(&mut self, ui: &mut Ui) {
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(match self.tab {
+                    Tab::Main => "Library",
+                    Tab::Settings => "Settings",
+                })
+                .strong()
+                .size(20.0),
+            );
+            ui.label(
+                RichText::new(match self.tab {
+                    Tab::Main => "Manage your emulators and ROM collection",
+                    Tab::Settings => "Configure launch behavior and updates",
+                })
+                .small()
+                .color(TEXT_MUTED),
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.add_sized(
+                    [220.0, 30.0],
+                    TextEdit::singleline(&mut self.search_query).hint_text("Search library..."),
+                );
+                ui.label(RichText::new("⌕").size(20.0).color(TEXT_MUTED));
+            });
+        });
+    }
+
+    fn show_modern_rom_card(&mut self, ui: &mut Ui, rom: Rom) {
+        let missing = !Path::new(&rom.source_path).exists();
+        let selected = self.selected_rom_id == Some(rom.id);
+        let border = if missing {
+            DANGER
+        } else if selected {
+            ACCENT
+        } else {
+            Color32::from_rgb(43, 75, 88)
+        };
+
+        card_frame(PANEL_BACKGROUND, border).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(if missing { "!" } else { "◈" })
+                        .size(22.0)
+                        .strong()
+                        .color(if missing { DANGER } else { ACCENT }),
+                );
+                ui.vertical(|ui| {
+                    ui.label(RichText::new(&rom.title).size(16.0).strong());
+                    ui.label(
+                        RichText::new(format!(
+                            "{}  •  {} plays",
+                            rom.platform_name, rom.play_count
+                        ))
+                        .small()
+                        .color(TEXT_MUTED),
+                    );
+                });
+                ui.with_layout(Layout::right_to_left(Align::TOP), |ui| {
+                    if ui
+                        .button(if rom.favorite { "★" } else { "☆" })
+                        .on_hover_text("Toggle favorite")
+                        .clicked()
+                    {
+                        self.toggle_favorite(rom.id);
+                    }
+                });
+            });
+            ui.add_space(10.0);
+            ui.label(
+                RichText::new(if missing {
+                    "ROM file is missing"
+                } else {
+                    "Ready to launch"
+                })
+                .small()
+                .color(if missing { DANGER } else { ACCENT_GREEN }),
+            );
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("▶  Play").clicked() {
+                    self.selected_rom_id = Some(rom.id);
+                    self.launch_rom(rom.id);
+                }
+                if ui.button("Details").clicked() {
+                    self.selected_rom_id = Some(rom.id);
+                }
+                ui.label(
+                    RichText::new(if rom.last_played_at.is_some() {
+                        "Played before"
+                    } else {
+                        "Never played"
+                    })
+                    .small()
+                    .color(TEXT_MUTED),
+                );
+            });
+        });
+    }
+
+    fn show_modern_details(&mut self, ui: &mut Ui) {
+        card_frame(PANEL_BACKGROUND, Color32::from_rgb(42, 61, 73)).show(ui, |ui| {
+            ui.label(
+                RichText::new("SELECTED ROM")
+                    .small()
+                    .color(TEXT_MUTED)
+                    .strong(),
+            );
+            ui.add_space(8.0);
+            let selected_rom = self
+                .selected_rom_id
+                .and_then(|id| self.roms.iter().find(|rom| rom.id == id))
+                .cloned();
+            if let Some(rom) = selected_rom {
+                let missing = !Path::new(&rom.source_path).exists();
+                ui.label(RichText::new(&rom.title).size(20.0).strong());
+                ui.label(RichText::new(&rom.platform_name).color(ACCENT));
+                ui.separator();
+                ui.label(
+                    RichText::new("SOURCE FILE")
+                        .small()
+                        .color(TEXT_MUTED)
+                        .strong(),
+                );
+                ui.label(RichText::new(&rom.source_path).small().color(TEXT_MUTED));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("Played {}", rom.play_count)));
+                    if rom.favorite {
+                        ui.label(RichText::new("★ Favorite").color(ACCENT_GREEN));
+                    }
+                });
+                ui.add_space(8.0);
+                if missing {
+                    ui.label(
+                        RichText::new("This file is no longer at its imported location.")
+                            .small()
+                            .color(DANGER),
+                    );
+                } else if ui.button("▶  Launch ROM").clicked() {
+                    self.launch_rom(rom.id);
+                }
+            } else {
+                ui.label(RichText::new("Choose a ROM card to see its details.").color(TEXT_MUTED));
+            }
+        });
+    }
+
+    fn show_modern_emulators(&mut self, ui: &mut Ui) {
+        ui.add_space(12.0);
+        card_frame(PANEL_BACKGROUND, Color32::from_rgb(42, 61, 73)).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new("EMULATORS")
+                        .small()
+                        .color(TEXT_MUTED)
+                        .strong(),
+                );
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.label(RichText::new(self.emulators.len().to_string()).color(ACCENT));
+                });
+            });
+            ui.add_space(8.0);
+            if self.emulators.is_empty() {
+                ui.label(RichText::new("No emulators imported yet.").color(TEXT_MUTED));
+            } else {
+                for emulator in self.emulators.clone().into_iter().take(6) {
+                    let missing = !Path::new(&emulator.executable_path).exists();
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(if missing { "!" } else { "●" }).color(if missing {
+                                DANGER
+                            } else {
+                                ACCENT_GREEN
+                            }),
+                        );
+                        ui.vertical(|ui| {
+                            ui.label(RichText::new(&emulator.name).strong());
+                            ui.label(
+                                RichText::new(&emulator.platform_name)
+                                    .small()
+                                    .color(TEXT_MUTED),
+                            );
+                        });
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui.small_button("Configure").clicked() {
+                                self.open_emulator_settings(emulator.id);
+                            }
+                        });
+                    });
+                    ui.add_space(5.0);
+                }
+            }
+        });
+    }
+
+    fn show_modern_main(&mut self, ui: &mut Ui) {
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Your collection").size(22.0).strong());
+            ui.label(
+                RichText::new(match self.library_filter {
+                    LibraryFilter::All => "All imported ROMs",
+                    LibraryFilter::Favorites => "Favorite ROMs",
+                })
+                .color(TEXT_MUTED),
+            );
+        });
+        ui.add_space(10.0);
+
+        card_frame(PANEL_RAISED, Color32::from_rgb(42, 61, 73)).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("PLATFORM").small().color(TEXT_MUTED).strong());
+                ui.add_sized(
+                    [190.0, 30.0],
+                    TextEdit::singleline(&mut self.platform_input)
+                        .hint_text("NES, SNES, PlayStation"),
+                );
+                ui.separator();
+                if ui.button("＋  Import ROMs").clicked() {
+                    if let Some(paths) = FileDialog::new().pick_files() {
+                        self.import_rom_paths(paths);
+                    }
+                }
+                if ui.button("＋  ROM folder").clicked() {
+                    self.import_rom_folder();
+                }
+                if ui.button("＋  Emulator").clicked() {
+                    if let Some(path) = FileDialog::new().pick_file() {
+                        self.import_emulator_paths(vec![path]);
+                    }
+                }
+                if ui.button("＋  Emulator folder").clicked() {
+                    self.import_emulator_folder();
+                }
+            });
+        });
+
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            for (label, value, color) in [
+                ("ROMs", self.roms.len(), ACCENT),
+                (
+                    "Favorites",
+                    self.roms.iter().filter(|rom| rom.favorite).count(),
+                    ACCENT_GREEN,
+                ),
+                (
+                    "Emulators",
+                    self.emulators.len(),
+                    Color32::from_rgb(191, 157, 255),
+                ),
+                (
+                    "Platforms",
+                    self.platforms.len(),
+                    Color32::from_rgb(255, 188, 105),
+                ),
+            ] {
+                card_frame(PANEL_BACKGROUND, Color32::from_rgb(42, 61, 73)).show(ui, |ui| {
+                    ui.label(RichText::new(label).small().color(TEXT_MUTED));
+                    ui.label(
+                        RichText::new(value.to_string())
+                            .size(24.0)
+                            .strong()
+                            .color(color),
+                    );
+                });
+            }
+        });
+
+        ui.add_space(12.0);
+        let visible_roms = self.modern_visible_roms();
+        ui.columns(2, |columns| {
+            columns[0].vertical(|ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("ROM LIBRARY")
+                            .small()
+                            .color(TEXT_MUTED)
+                            .strong(),
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(RichText::new(visible_roms.len().to_string()).color(ACCENT));
+                    });
+                });
+                ui.add_space(8.0);
+                ScrollArea::vertical().max_height(480.0).show(ui, |ui| {
+                    if visible_roms.is_empty() {
+                        card_frame(PANEL_BACKGROUND, Color32::from_rgb(42, 61, 73)).show(
+                            ui,
+                            |ui| {
+                                ui.label(
+                                    RichText::new(if self.roms.is_empty() {
+                                        "Import your first ROM to start building the library."
+                                    } else {
+                                        "No ROMs match the current search or filter."
+                                    })
+                                    .color(TEXT_MUTED),
+                                );
+                            },
+                        );
+                    } else {
+                        ui.columns(2, |cards| {
+                            for (index, rom) in visible_roms.iter().cloned().enumerate() {
+                                Self::show_modern_rom_card(self, &mut cards[index % 2], rom);
+                                cards[index % 2].add_space(10.0);
+                            }
+                        });
+                    }
+                });
+            });
+            columns[1].vertical(|ui| {
+                self.show_modern_details(ui);
+                self.show_modern_emulators(ui);
+            });
+        });
+
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            if ui.button("Home").clicked() {
+                if let Some(home) = &self.home_dir {
+                    self.current_dir = home.clone();
+                    let _ = self.save_app_state();
+                }
+            }
+            if ui.button("Go up").clicked() && self.current_dir.pop() {
+                let _ = self.save_app_state();
+            }
+            if ui.button("Refresh library").clicked() {
+                let _ = self.refresh_from_db();
+            }
+            ui.label(RichText::new(&self.status).small().color(TEXT_MUTED));
+        });
+        if !self.current_dir.as_os_str().is_empty() {
+            ui.label(
+                RichText::new(format!("Current directory: {}", self.current_dir.display()))
+                    .small()
+                    .color(TEXT_MUTED),
+            );
+        }
+    }
+
+    #[allow(dead_code)]
     fn show_main_tab(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             ui.label("Platform:");
@@ -1279,12 +1786,20 @@ impl App {
     }
 }
 
-fn append_launch_arguments(command: &mut Command, settings: &LaunchSettings) {
+fn append_launch_arguments(
+    command: &mut Command,
+    settings: &LaunchSettings,
+    executable_path: &str,
+) {
     if settings.borderless_enabled {
         command.arg(&settings.borderless_arg);
     }
     if settings.fullscreen_enabled {
         command.arg(&settings.fullscreen_arg);
+    } else if executable_path.to_lowercase().contains("mgba") {
+        // mGBA persists its last fullscreen state. Force the requested
+        // windowed state when the profile disables fullscreen.
+        command.arg("-C").arg("fullscreen=0");
     }
     if settings.resolution_enabled {
         command.arg(&settings.res_width_arg);
@@ -1296,29 +1811,29 @@ fn append_launch_arguments(command: &mut Command, settings: &LaunchSettings) {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut EFrame) {
-        CentralPanel::default().show(ui, |inner_ui| {
-            Frame::new()
-                .stroke(Stroke::new(1.0, egui::Color32::LIGHT_GRAY))
-                .show(inner_ui, |inner_ui| {
-                    inner_ui.horizontal(|inner_ui| {
-                        inner_ui.label("Menu:");
-                        ComboBox::from_id_salt(Id::new("tab_selector"))
-                            .selected_text(match self.tab {
-                                Tab::Main => "Main",
-                                Tab::Settings => "Settings",
-                            })
-                            .show_ui(inner_ui, |ui| {
-                                ui.selectable_value(&mut self.tab, Tab::Main, "Main");
-                                ui.selectable_value(&mut self.tab, Tab::Settings, "Settings");
-                            });
-                    });
-                    inner_ui.separator();
-                    match self.tab {
-                        Tab::Main => self.show_main_tab(inner_ui),
-                        Tab::Settings => self.show_settings_tab(inner_ui),
-                    }
-                });
-        });
+        Panel::left("modern_navigation")
+            .resizable(false)
+            .default_size(190.0)
+            .frame(Frame::new().fill(PANEL_BACKGROUND).inner_margin(12))
+            .show(ui, |ui| self.show_modern_sidebar(ui));
+        Panel::top("modern_top_bar")
+            .frame(Frame::new().fill(PANEL_BACKGROUND).inner_margin(14))
+            .show(ui, |ui| self.show_modern_top_bar(ui));
+        CentralPanel::default()
+            .frame(Frame::new().fill(APP_BACKGROUND).inner_margin(18))
+            .show(ui, |ui| match self.tab {
+                Tab::Main => self.show_modern_main(ui),
+                Tab::Settings => {
+                    ui.label(RichText::new("Settings").size(22.0).strong());
+                    ui.label(
+                        RichText::new("Configure launch behavior, folders, and updates")
+                            .color(TEXT_MUTED),
+                    );
+                    ui.add_space(12.0);
+                    card_frame(PANEL_BACKGROUND, Color32::from_rgb(42, 61, 73))
+                        .show(ui, |ui| self.show_settings_tab(ui));
+                }
+            });
     }
 }
 
@@ -1339,7 +1854,11 @@ fn main() -> Result<(), eframe::Error> {
 
     let window_title = format!("Emulator Hub GUI v{APP_VERSION}");
     let mut options = NativeOptions::default();
-    let mut viewport = options.viewport.with_title(window_title.clone());
+    let mut viewport = options
+        .viewport
+        .with_title(window_title.clone())
+        .with_inner_size([1280.0, 800.0])
+        .with_min_inner_size([1000.0, 650.0]);
     if let Some(icon) = app_icon() {
         viewport = viewport.with_icon(icon);
     }
@@ -1347,7 +1866,8 @@ fn main() -> Result<(), eframe::Error> {
     eframe::run_native(
         &window_title,
         options,
-        Box::new(|_cc| {
+        Box::new(|cc| {
+            configure_theme(&cc.egui_ctx);
             Ok(App::new()
                 .map(|app| Box::new(app) as Box<dyn eframe::App>)
                 .map_err(|error| Box::new(std::io::Error::other(error.to_string())))?)

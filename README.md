@@ -8,9 +8,9 @@
   A Windows desktop library for organizing emulators and ROMs in one place.
 </p>
 
-## Version 0.0.2
+## Version 0.0.3.2
 
-This release adds a per-user Windows installer.
+This hotfix improves fullscreen and windowed-mode handling when launching ROMs.
 
 ## Features
 
@@ -30,7 +30,7 @@ This release adds a per-user Windows installer.
 Download the installer from the GitHub Release assets:
 
 ```text
-EmulatorHub-v0.0.2-Setup.exe
+EmulatorHub-v0.0.3.2-Setup.exe
 ```
 
 The installer places the app in:
@@ -115,8 +115,8 @@ matching tag:
 
 ```powershell
 git add .
-git commit -m "Release Emulator Hub 0.0.2"
-git tag v0.0.2
+git commit -m "Release Emulator Hub 0.0.3.2 hotfix"
+git tag v0.0.3.2
 git push origin main --tags
 ```
 
