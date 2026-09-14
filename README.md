@@ -161,6 +161,23 @@ The workflow in `.github/workflows/release.yml` builds and publishes:
 
 See [`RELEASING.md`](RELEASING.md) for more details.
 
+## Disclaimer
+
+<details>
+<summary>Show / hide</summary>
+
+Emulator Hub is a library and management tool only. It does not distribute,
+host, provide, or endorse pirated software, unauthorized ROMs, copyrighted
+game files, or other content for which the user does not have the necessary
+rights.
+
+Users are responsible for obtaining and using emulators, ROMs, and other
+software lawfully. Only import and use files that you own or are legally
+authorized to access, and comply with all applicable copyright and
+intellectual-property laws.
+
+</details>
+
 ## Credits
 
 <details>
