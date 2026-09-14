@@ -1,0 +1,3 @@
+# Magpie is bundled third-party software. Exclude its shaders and support files
+# from GitHub's repository language statistics.
+installer/Magpie/** linguist-vendored
